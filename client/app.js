@@ -48,13 +48,16 @@ async function runCheck(take) {
       "p",
       data.source === "stub"
         ? "These verdicts are the take's designed state, standing in for the measured checks while the pipeline is built."
-        : "These verdicts were measured by the checks pipeline."
+        : data.source === "mixed"
+          ? "Each verdict says how it was reached: measured from the take's pixels, or the take's designed state standing in until the model checks run."
+          : "These verdicts were measured by the checks pipeline."
     )
   );
 
   const list = el("ul");
   for (const check of data.checks) {
-    list.appendChild(el("li", `${check.name}: ${check.verdict} — ${check.detail}`));
+    const sourceWord = check.source === "measured" ? "measured" : "designed state";
+    list.appendChild(el("li", `${check.name}: ${check.verdict} (${sourceWord}) — ${check.detail}`));
   }
   frag.appendChild(list);
 
