@@ -46,24 +46,37 @@ async function runCheck(take) {
   frag.appendChild(
     el(
       "p",
-      data.source === "stub"
-        ? "These verdicts are the take's designed state, standing in for the measured checks while the pipeline is built."
-        : data.source === "mixed"
-          ? "Each verdict says how it was reached: measured from the take's pixels, or the take's designed state standing in until the model checks run."
-          : "These verdicts were measured by the checks pipeline."
+      data.source === "live"
+        ? "Every verdict below was measured from the take, judged by the model check, or determined by the take itself — each one says which."
+        : "Each verdict says how it was reached. Where a model check has not run, the verdict is uncertain and says why — never a guess."
     )
   );
 
+  const SOURCE_WORDS = {
+    measured: "measured",
+    model: "model check",
+    determined: "from the take itself",
+    "model-off": "model check not run",
+    "model-error": "model check failed",
+    "model-unreadable": "model reply unreadable",
+  };
   const list = el("ul");
   for (const check of data.checks) {
-    const sourceWord = check.source === "measured" ? "measured" : "designed state";
+    const sourceWord = SOURCE_WORDS[check.source] || check.source;
     list.appendChild(el("li", `${check.name}: ${check.verdict} (${sourceWord}) — ${check.detail}`));
   }
   frag.appendChild(list);
 
   if (data.privacyWarning) {
+    const warnSource =
+      data.privacyWarningSource === "model"
+        ? "found by the model check"
+        : data.privacyWarningSource === "designed"
+          ? "from this take's designed state; the model check has not run yet"
+          : "source unconfirmed";
     frag.appendChild(el("h3", `Warning — ${data.privacyWarning.name}`));
     frag.appendChild(el("p", data.privacyWarning.detail));
+    frag.appendChild(el("p", `Warning source: ${warnSource}.`));
   }
 
   const fixes = data.checks.filter((c) => c.verdict === "fix").length;

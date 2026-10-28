@@ -16,41 +16,89 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const { TAKES } = require("./seed-takes");
+const { TAKES, CHECKS } = require("./seed-takes");
 const { measureImage } = require("./measure");
+const { runSemanticChecks } = require("./semantic");
 
 const MEDIA_DIR = path.join(__dirname, "seed-media");
 const measurementCache = new Map();
+const semanticCache = new Map();
 
-// Builds a take's check list. Every check carries its own source:
-// - "measured": computed from the take's actual pixels by measure.js
-//   (framing, crop safety, quality — for takes that have seeded media);
-// - "designed": the take's designed state, standing in until the semantic
-//   checks (text reading, first impression, audio) run through the models.
-// The response-level source is "mixed" when both kinds are present.
+// Builds a take's check list from the real pipelines. Every check carries
+// its source, and no source is a stand-in verdict:
+// - "measured": computed from the take's pixels by measure.js;
+// - "model": judged by the semantic pipeline (Muse Spark);
+// - "determined": settled by the take itself (a still photo has no audio);
+// - "model-off" / "model-error" / "model-unreadable": the semantic check
+//   honestly reporting "uncertain" with its reason — the design has always
+//   allowed uncertain, and a failed or unfunded call never becomes a guess.
 async function buildChecks(take) {
-  const checks = take.stubChecks.map((c) => ({ ...c, source: "designed" }));
+  const byId = {};
+  for (const c of CHECKS) {
+    byId[c.id] = { id: c.id, name: c.name, verdict: "uncertain", detail: "", source: "pending" };
+  }
+  let privacyWarning = null;
+  let privacyWarningSource = null;
+
   const pngPath = path.join(MEDIA_DIR, `${take.id}.png`);
   const sidecarPath = path.join(MEDIA_DIR, `${take.id}.json`);
-  if (take.kind === "photo" && fs.existsSync(pngPath) && fs.existsSync(sidecarPath)) {
-    if (!measurementCache.has(take.id)) {
-      const buffer = fs.readFileSync(pngPath);
-      const groundTruth = JSON.parse(fs.readFileSync(sidecarPath, "utf8"));
-      measurementCache.set(take.id, await measureImage(buffer, groundTruth));
+  const hasMedia = take.kind === "photo" && fs.existsSync(pngPath);
+
+  if (hasMedia) {
+    const buffer = fs.readFileSync(pngPath);
+
+    if (fs.existsSync(sidecarPath)) {
+      if (!measurementCache.has(take.id)) {
+        const groundTruth = JSON.parse(fs.readFileSync(sidecarPath, "utf8"));
+        measurementCache.set(take.id, await measureImage(buffer, groundTruth));
+      }
+      const m = measurementCache.get(take.id);
+      if (m.framing) Object.assign(byId.framing, { verdict: m.framing.verdict, detail: m.framing.detail, source: "measured" });
+      if (m.cropSafety) Object.assign(byId.crop, { verdict: m.cropSafety.verdict, detail: m.cropSafety.detail, source: "measured" });
+      Object.assign(byId.quality, { verdict: m.quality.verdict, detail: m.quality.detail, source: "measured" });
     }
-    const m = measurementCache.get(take.id);
-    const byId = Object.fromEntries(checks.map((c) => [c.id, c]));
-    if (m.framing) Object.assign(byId.framing, { verdict: m.framing.verdict, detail: m.framing.detail, source: "measured" });
-    if (m.cropSafety) Object.assign(byId.crop, { verdict: m.cropSafety.verdict, detail: m.cropSafety.detail, source: "measured" });
-    Object.assign(byId.quality, { verdict: m.quality.verdict, detail: m.quality.detail, source: "measured" });
+
+    if (!semanticCache.has(take.id)) {
+      semanticCache.set(take.id, await runSemanticChecks(buffer, take.intent));
+    }
+    const sem = semanticCache.get(take.id);
+    Object.assign(byId.text, { verdict: sem.text.verdict, detail: sem.text.detail, source: sem.source });
+    Object.assign(byId.firstImpression, {
+      verdict: sem.firstImpression.verdict,
+      detail: sem.firstImpression.detail,
+      source: sem.source,
+    });
+    privacyWarning = sem.privacyWarning;
+    privacyWarningSource = sem.privacyWarningSource;
+
+    Object.assign(byId.audio, {
+      verdict: "uncertain",
+      detail: "Still photo: there is no audio track to check.",
+      source: "determined",
+    });
+  } else {
+    const noMedia = `This seeded ${take.kind} has no media file yet, so there is nothing to measure or judge.`;
+    for (const id of ["framing", "crop", "quality", "text", "firstImpression", "audio"]) {
+      Object.assign(byId[id], { verdict: "uncertain", detail: noMedia, source: "determined" });
+    }
   }
-  const anyMeasured = checks.some((c) => c.source === "measured");
-  const allMeasured = checks.every((c) => c.source === "measured");
+
+  // The designed privacy warning exercises the warning path only while the
+  // model check has not run; a live model answer replaces it entirely.
+  if (!privacyWarning && privacyWarningSource === "model-off" && take.designedPrivacyWarning) {
+    privacyWarning = take.designedPrivacyWarning;
+    privacyWarningSource = "designed";
+  }
+
+  const checks = CHECKS.map((c) => byId[c.id]);
+  const allSettled = checks.every((c) => ["measured", "model", "determined"].includes(c.source));
+  const anyRealCheck = checks.some((c) => ["measured", "model"].includes(c.source));
   return {
     take: publicTake(take),
-    source: allMeasured ? "measured" : anyMeasured ? "mixed" : "stub",
+    source: allSettled && anyRealCheck ? "live" : "partial",
     checks,
-    privacyWarning: take.privacyWarning,
+    privacyWarning,
+    privacyWarningSource,
   };
 }
 
@@ -84,9 +132,9 @@ const server = http.createServer((req, res) => {
       service: "blind-creator-preflight-backend",
       // Presence only. The value itself is never reported anywhere.
       modelApiKeyConfigured: Boolean(process.env.MODEL_API_KEY),
-      checksMode: "partial",
+      checksMode: "pipelines",
       checksNote:
-        "Framing, crop safety, and quality are measured from the seeded takes' pixels where seeded media exists. Text, first impression, and audio still report the takes' designed states until the model pipeline runs; every check in every response names its own source. No Model API call has been made yet.",
+        "Framing, crop safety, and quality are measured from pixels; text, first impression, and the privacy warning come from the Muse Spark semantic pipeline; audio is determined by the take itself. Semantic calls run only when the funding switch is on (MODEL_CALLS_ENABLED) — while it is off, those checks report uncertain with the reason, never a guessed verdict.",
     });
   }
 
