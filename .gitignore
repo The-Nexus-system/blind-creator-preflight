@@ -1,0 +1,30 @@
+# Secrets — never commit keys or credentials
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Dependencies and build output
+node_modules/
+dist/
+build/
+.next/
+out/
+
+# Expo / React Native
+.expo/
+*.apk
+*.aab
+*.ipa
+
+# Logs and OS noise
+*.log
+.DS_Store
+Thumbs.db
+
+# Local media and test captures (seeded takes are added deliberately, by name)
+*.mov
+*.mp4
+*.wav
+*.mp3
