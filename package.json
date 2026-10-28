@@ -1,0 +1,1 @@
+{"description":"Blind Creator Pre-Flight — a pre-publish check for blind and DeafBlind creators. Built during the Meta Global AI Developer Hackathon, Oct 26 - Nov 4, 2026.","engines":{"node":">=18"},"name":"blind-creator-preflight","private":true,"scripts":{"start":"node server/index.js"},"type":"commonjs","version":"0.1.0"}

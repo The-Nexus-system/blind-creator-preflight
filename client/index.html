@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blind Creator Pre-Flight — check before you post</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <h1>Blind Creator Pre-Flight</h1>
+  <p>Check a photo or a short video before you post it. Every result is plain text: pass, fix, or uncertain.</p>
+</header>
+
+<main>
+  <section aria-labelledby="composer-heading">
+    <h2 id="composer-heading">Composer (simulated)</h2>
+    <p id="composer-status">No take chosen yet. Pick one of the seeded takes below to run its pre-flight check.</p>
+  </section>
+
+  <section aria-labelledby="takes-heading">
+    <h2 id="takes-heading">Seeded takes</h2>
+    <p>These are written example takes with known states — clean, or carrying one named flaw — so the checks can be demonstrated and tested.</p>
+    <ul id="take-list"></ul>
+  </section>
+
+  <section aria-labelledby="results-heading">
+    <h2 id="results-heading">Pre-Flight results</h2>
+    <div id="results" aria-live="polite">
+      <p>No results yet.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <p>Demo build for the Meta Global AI Developer Hackathon. Verdicts shown for the seeded takes are the takes' designed states, standing in for the measured checks while the pipeline is built — the app says so wherever it matters, and never presents a stand-in as a measurement.</p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
