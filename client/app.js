@@ -34,9 +34,12 @@ function el(tag, text) {
   return node;
 }
 
+let allTakes = [];
+
 async function loadTakes() {
   const res = await fetch("/api/takes");
   const data = await res.json();
+  allTakes = data.takes;
   takeListEl.replaceChildren();
   for (const take of data.takes) {
     const li = el("li");
@@ -330,4 +333,144 @@ loadTakes().catch(() => {
   resultsEl.replaceChildren(
     el("p", "The take list could not be loaded. The backend may not be running.")
   );
+});
+
+// --- Library Sweep (simulated slice) ---------------------------------------
+// The sweep data comes from the server (the seeded mini-library and its
+// pinned sort). The working state — what the creator has culled and what
+// they have approved to share — lives here in the client session, like
+// every other working state in Pre-Flight. Culling in this slice deletes
+// nothing anywhere; the confirmation text says so every time.
+
+const libraryEl = document.getElementById("library-area");
+let sweepData = null;
+const culledIds = new Set();
+const approvedShareIds = new Set();
+let armedCullCategory = null;
+
+async function loadLibrary() {
+  const res = await fetch("/api/library/sweep");
+  sweepData = await res.json();
+  renderLibrary();
+}
+
+function renderLibrary() {
+  if (!sweepData) return;
+  const frag = document.createDocumentFragment();
+  frag.appendChild(el("p", sweepData.note));
+  frag.appendChild(
+    el("p", `Your library, swept: ${sweepData.totalItems} items, ${sweepData.totalFiles} files in total.`)
+  );
+
+  frag.appendChild(el("h3", "Categories"));
+  const catList = el("ul");
+  for (const cat of sweepData.categories) {
+    const remaining = cat.itemIds.filter((id) => !culledIds.has(id));
+    const line = `${cat.name}: ${remaining.length} item${remaining.length === 1 ? "" : "s"} (${cat.itemIds.reduce(
+      (n, id) => n + (sweepData.items.find((i) => i.id === id) || { files: 0 }).files,
+      0
+    )} files)${remaining.length < cat.itemIds.length ? ` — ${cat.itemIds.length - remaining.length} culled this session` : ""}.`;
+    const li = el("li", line);
+    if (remaining.length) {
+      const cullBtn = el("button", `Cull the ${cat.name} category`);
+      cullBtn.type = "button";
+      cullBtn.addEventListener("click", () => {
+        armedCullCategory = armedCullCategory === cat.name ? null : cat.name;
+        renderLibrary();
+      });
+      li.appendChild(cullBtn);
+      if (armedCullCategory === cat.name) {
+        const flagged = remaining
+          .map((id) => sweepData.items.find((i) => i.id === id))
+          .filter((i) => i && i.privacyWarning);
+        const confirmText =
+          `Cull the ${cat.name} set — ${remaining.length} item${remaining.length === 1 ? "" : "s"} (${remaining.join(", ")})? ` +
+          (flagged.length
+            ? `This set contains a flagged item, named once more before you confirm: ${flagged.map((i) => `${i.id} — ${i.privacyWarning.name}`).join(" ")} `
+            : "") +
+          "This sweep is simulated: culling here deletes nothing from any real library.";
+        li.appendChild(el("p", confirmText));
+        const confirmBtn = el("button", `Confirm culling ${cat.name}`);
+        confirmBtn.type = "button";
+        confirmBtn.addEventListener("click", () => {
+          for (const id of remaining) {
+            culledIds.add(id);
+            approvedShareIds.delete(id);
+          }
+          armedCullCategory = null;
+          renderLibrary();
+        });
+        li.appendChild(confirmBtn);
+      }
+    }
+    catList.appendChild(li);
+  }
+  frag.appendChild(catList);
+
+  // The warning stands alone — never a line inside a category.
+  for (const warning of sweepData.privacyWarnings) {
+    if (culledIds.has(warning.itemId)) continue;
+    frag.appendChild(el("h3", `Warning — ${warning.itemId}: ${warning.name}`));
+    frag.appendChild(el("p", warning.detail));
+  }
+
+  frag.appendChild(el("h3", "Every item, in words"));
+  const itemList = el("ul");
+  for (const item of sweepData.items) {
+    const state = culledIds.has(item.id)
+      ? "Culled this session."
+      : approvedShareIds.has(item.id)
+        ? "In your Approved to share set."
+        : "Not culled, not approved.";
+    const li = el(
+      "li",
+      `${item.id} (${item.category}${item.files > 1 ? `, ${item.files} files` : ""}): ${item.description} ${state}`
+    );
+    if (!culledIds.has(item.id)) {
+      const toggle = el(
+        "button",
+        approvedShareIds.has(item.id)
+          ? `Remove ${item.id} from Approved to share`
+          : `Add ${item.id} to Approved to share`
+      );
+      toggle.type = "button";
+      toggle.addEventListener("click", () => {
+        if (approvedShareIds.has(item.id)) approvedShareIds.delete(item.id);
+        else approvedShareIds.add(item.id);
+        renderLibrary();
+      });
+      li.appendChild(toggle);
+      if (item.takeId) {
+        const send = el("button", `Run the full pre-flight check on ${item.id}`);
+        send.type = "button";
+        send.addEventListener("click", () => {
+          const take = allTakes.find((t) => t.id === item.takeId);
+          if (take) runCheck(take);
+        });
+        li.appendChild(send);
+      }
+    }
+    itemList.appendChild(li);
+  }
+  frag.appendChild(itemList);
+
+  frag.appendChild(
+    el(
+      "p",
+      approvedShareIds.size
+        ? `Approved to share: ${approvedShareIds.size} item${approvedShareIds.size === 1 ? "" : "s"} — ${[...approvedShareIds].join(", ")}. In the full sweep, this set is what you would limit a social app to in your phone's per-app photo-access settings; Pre-Flight curates the set and guides the setting, and says plainly that it cannot change another app's permission for you.`
+        : "Approved to share: empty. Add items above to build the set you would let a social app see."
+    )
+  );
+  if (culledIds.size) {
+    frag.appendChild(
+      el("p", `Culled this session (simulated — nothing deleted): ${[...culledIds].join(", ")}.`)
+    );
+  }
+
+  libraryEl.replaceChildren(frag);
+}
+
+loadLibrary().catch(() => {
+  libraryEl.replaceChildren(el("p", "The sweep could not be loaded. The backend may not be running."));
 });

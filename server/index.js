@@ -21,6 +21,7 @@ const { measureImage } = require("./measure");
 const { runSemanticChecks } = require("./semantic");
 const { buildProofCopy, draftAltText, readiness, buildPublicDescription } = require("./copy");
 const { availableRepairs, applyRepair } = require("./repair");
+const { sweep } = require("./library");
 
 const MEDIA_DIR = path.join(__dirname, "seed-media");
 const REPAIRED_DIR = path.join(MEDIA_DIR, "repaired");
@@ -162,6 +163,10 @@ const server = http.createServer((req, res) => {
       checksNote:
         "Framing, crop safety, and quality are measured from pixels; text, first impression, and the privacy warning come from the Muse Spark semantic pipeline; audio is determined by the take itself. Semantic calls run only when the funding switch is on (MODEL_CALLS_ENABLED) — while it is off, those checks report uncertain with the reason, never a guessed verdict.",
     });
+  }
+
+  if (url.pathname === "/api/library/sweep") {
+    return sendJson(res, 200, sweep());
   }
 
   if (url.pathname === "/api/takes") {

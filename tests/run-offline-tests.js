@@ -180,6 +180,24 @@ async function main() {
   assert.strictEqual(pdVideo.available, false, "a video with no media gets no invented description");
   ok("Tier 2 public description: facts only for photos, honest unavailability for media-less video");
 
+const { sweep } = require("../server/library");
+
+  // 7. Library Sweep slice: the pinned sort from the design record.
+  const sw = sweep();
+  assert.strictEqual(sw.simulated, true, "the slice labels itself simulated");
+  assert.strictEqual(sw.totalItems, 6);
+  assert.strictEqual(sw.totalFiles, 7, "the duplicate pair makes 7 files from 6 items");
+  const shots = sw.categories.find((c) => c.name === "Screenshots");
+  assert.strictEqual(shots.itemCount, 2, "two screenshots");
+  const sl3 = sw.items.find((i) => i.id === "SL-3");
+  assert.strictEqual(sl3.category, "Documents and text-heavy");
+  assert.strictEqual(sw.privacyWarnings.length, 1, "exactly one warning at library scale");
+  assert.strictEqual(sw.privacyWarnings[0].itemId, "SL-3");
+  assert(sw.privacyWarnings[0].name.includes("readable home address"), "the warning states its reason");
+  const sl4 = sw.items.find((i) => i.id === "SL-4");
+  assert.strictEqual(sl4.files, 2, "the duplicate pair is one item of two files");
+  ok("Library Sweep slice: pinned sort, totals, and the warning standing alone");
+
   console.log(`\n${passed} test groups passed.`);
 }
 
