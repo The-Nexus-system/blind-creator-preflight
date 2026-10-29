@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "@meta-sam/parser": "^0.1.0",
     "jimp": "^1.6.1"
   },
   "description": "Blind Creator Pre-Flight — a pre-publish check for blind and DeafBlind creators. Built during the Meta Global AI Developer Hackathon, Oct 26 - Nov 4, 2026.",
