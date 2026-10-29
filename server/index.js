@@ -147,7 +147,10 @@ async function measureTake(take, variantId) {
     } else {
       const media = resolveMedia(take, variantId);
       if (!media || !media.groundTruth) return null;
-      measurementCache.set(key, await measureImage(media.buffer, media.groundTruth));
+      measurementCache.set(
+        key,
+        await measureImage(media.buffer, media.groundTruth, media.groundTruth.contentBox || null)
+      );
     }
   }
   return measurementCache.get(key);
@@ -356,11 +359,21 @@ const server = http.createServer((req, res) => {
           fs.mkdirSync(REPAIRED_DIR, { recursive: true });
           fs.writeFileSync(path.join(REPAIRED_DIR, `${take.id}--${input.repairId}.png`), out.buffer);
           // A repaired video variant's sidecar keeps the video shape:
-          // the repair's transformed boxes under their own names.
+          // the repair's transformed boxes under their own names. A
+          // reframe also declares the box its picture occupies, so the
+          // re-check measures the picture, not the repair's own border.
           const variantSidecar =
             take.kind === "video"
-              ? { ...media.sidecar, subject: out.groundTruth.subject, banner: out.groundTruth.sign }
-              : out.groundTruth;
+              ? {
+                  ...media.sidecar,
+                  subject: out.groundTruth.subject,
+                  banner: out.groundTruth.sign,
+                  ...(out.contentBox ? { contentBox: out.contentBox } : {}),
+                }
+              : {
+                  ...out.groundTruth,
+                  ...(out.contentBox ? { contentBox: out.contentBox } : {}),
+                };
           fs.writeFileSync(
             path.join(REPAIRED_DIR, `${take.id}--${input.repairId}.json`),
             JSON.stringify(variantSidecar, null, 2)

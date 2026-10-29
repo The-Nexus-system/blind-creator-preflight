@@ -56,9 +56,38 @@ function boxTouchesFrameEdge(box, width, height, marginFrac = 0.02) {
   return edges;
 }
 
-async function measureImage(buffer, groundTruth) {
+async function measureImage(buffer, groundTruth, contentBox) {
   const img = await Jimp.fromBuffer ? await Jimp.fromBuffer(buffer) : await Jimp.read(buffer);
   const { width, height } = img.bitmap;
+
+  // The sharpness statistic is computed over the picture itself. A repair
+  // that pulls a frame back declares the rectangle it placed the picture
+  // into (contentBox, in this image's coordinates); the border outside it
+  // is flat fill the repair added, and grading it would grade the repair's
+  // own scaffolding — the fill's zero gradients dilute the strong-edge
+  // tail until a sharp picture reads as smeared. Only a repair's declared
+  // box scopes the measurement: a creator's own borders are part of their
+  // picture and stay measured. Brightness is always measured over the
+  // whole frame; the fill is the take's own edge colour, so it does not
+  // misrepresent the exposure the way it dilutes the edge tail.
+  const region =
+    contentBox &&
+    Number.isFinite(contentBox.x0) &&
+    Number.isFinite(contentBox.x1) &&
+    contentBox.x0 >= 0 &&
+    contentBox.y0 >= 0 &&
+    contentBox.x1 <= width &&
+    contentBox.y1 <= height &&
+    contentBox.x1 > contentBox.x0 &&
+    contentBox.y1 > contentBox.y0
+      ? {
+          x0: Math.floor(contentBox.x0),
+          y0: Math.floor(contentBox.y0),
+          x1: Math.floor(contentBox.x1),
+          y1: Math.floor(contentBox.y1),
+        }
+      : { x0: 0, y0: 0, x1: width, y1: height };
+  const scoped = region.x0 > 0 || region.y0 > 0 || region.x1 < width || region.y1 < height;
 
   // Brightness from the pixel data; sharpness from the high tail of the local
   // gradient distribution. A mean gradient is the wrong statistic: honest
@@ -80,16 +109,30 @@ async function measureImage(buffer, groundTruth) {
       const grey = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
       row[x] = grey;
       sum += grey;
-      if (x > 0) {
-        gradHist[Math.round(Math.abs(grey - row[x - 1]))]++;
+    }
+    prevRow = row;
+  }
+  // Gradient samples: horizontal and vertical neighbour pairs with BOTH
+  // pixels inside the measured region, so the artificial step between the
+  // repair's fill and the picture is never counted as picture detail.
+  const regionWidth = region.x1 - region.x0;
+  let prevRegionRow = null;
+  for (let y = region.y0; y < region.y1; y++) {
+    const rowSeg = new Float32Array(regionWidth);
+    for (let x = region.x0; x < region.x1; x++) {
+      const i = (y * width + x) * 4;
+      const grey = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+      rowSeg[x - region.x0] = grey;
+      if (x > region.x0) {
+        gradHist[Math.round(Math.abs(grey - rowSeg[x - region.x0 - 1]))]++;
         gradCount++;
       }
-      if (prevRow) {
-        gradHist[Math.round(Math.abs(grey - prevRow[x]))]++;
+      if (prevRegionRow) {
+        gradHist[Math.round(Math.abs(grey - prevRegionRow[x - region.x0]))]++;
         gradCount++;
       }
     }
-    prevRow = row;
+    prevRegionRow = rowSeg;
   }
   const meanBrightness = sum / (width * height) / 255; // 0..1
   // 99.9th-percentile gradient: robust against a stray hot pixel in a real
@@ -161,11 +204,14 @@ async function measureImage(buffer, groundTruth) {
   if (meanBrightness < 0.12) qualityIssues.push(`very dark (mean brightness ${meanBrightness.toFixed(2)} of 1)`);
   if (meanBrightness > 0.93) qualityIssues.push(`blown out (mean brightness ${meanBrightness.toFixed(2)} of 1)`);
   if (sharpness < 0.2) qualityIssues.push(`edges are smeared (strongest-edge strength ${sharpness.toFixed(3)} of 1, threshold 0.20)`);
+  const basis = scoped
+    ? " Edge strength was measured on the picture itself, inside the border the repair added."
+    : "";
   result.quality = {
     verdict: qualityIssues.length ? "fix" : "pass",
     detail: qualityIssues.length
-      ? `Measured: ${qualityIssues.join("; ")}.`
-      : `Measured: mean brightness ${meanBrightness.toFixed(2)} of 1, edge strength ${sharpness.toFixed(3)} of 1 — within the plain thresholds.`,
+      ? `Measured: ${qualityIssues.join("; ")}.${basis}`
+      : `Measured: mean brightness ${meanBrightness.toFixed(2)} of 1, edge strength ${sharpness.toFixed(3)} of 1 — within the plain thresholds.${basis}`,
   };
 
   return result;
@@ -201,7 +247,7 @@ async function measureVideoFrames(frameBuffer, postedBuffer, sidecar) {
     labels: { sign: "banner" },
   };
 
-  const recorded = await measureImage(frameBuffer, recordedGT);
+  const recorded = await measureImage(frameBuffer, recordedGT, sidecar.contentBox || null);
   const posted = await measureImage(postedBuffer, postedGT);
 
   let framing = null;

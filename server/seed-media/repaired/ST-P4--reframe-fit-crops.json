@@ -11,5 +11,11 @@
     "x1": 778,
     "y1": 648
   },
-  "privateItem": null
+  "privateItem": null,
+  "contentBox": {
+    "x0": 36,
+    "y0": 129,
+    "x1": 778,
+    "y1": 871
+  }
 }

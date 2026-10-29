@@ -135,8 +135,9 @@ async function main() {
   const p4offers = availableRepairs(p4m, p4gt).map((r) => r.id);
   assert(p4offers.includes("reframe-fit-crops"), "P4 offers the crop reframe");
   const p4fixed = await applyRepair(p4buf, p4gt, "reframe-fit-crops", p4m);
-  const p4after = await measureImage(p4fixed.buffer, p4fixed.groundTruth);
+  const p4after = await measureImage(p4fixed.buffer, p4fixed.groundTruth, p4fixed.contentBox);
   assert.strictEqual(p4after.cropSafety.verdict, "pass", "after the reframe, the measured crop verdict flips to pass");
+  assert.strictEqual(p4after.quality.verdict, "pass", "after the reframe, quality still passes — the measurement judges the picture, not the repair's border");
   assert(p4fixed.changes.length >= 2, "the repair describes what changed in measurable terms");
   ok("ST-P4: crop repair is offered, performed, and the re-check passes");
 
@@ -145,8 +146,9 @@ async function main() {
   const p2m = await measureImage(p2buf, p2gt);
   assert(availableRepairs(p2m, p2gt).some((r) => r.id === "reframe-margin"));
   const p2fixed = await applyRepair(p2buf, p2gt, "reframe-margin", p2m);
-  const p2after = await measureImage(p2fixed.buffer, p2fixed.groundTruth);
+  const p2after = await measureImage(p2fixed.buffer, p2fixed.groundTruth, p2fixed.contentBox);
   assert.strictEqual(p2after.framing.verdict, "pass", "after the reframe, the measured framing verdict flips to pass");
+  assert.strictEqual(p2after.quality.verdict, "pass", "after the reframe, quality still passes on the scoped measurement");
   ok("ST-P2: framing repair is offered, performed, and the re-check passes");
 
   const darkBuf = await applyGain(fs.readFileSync(path.join(mediaDir, "ST-P1.png")), 0.12);
@@ -231,14 +233,44 @@ const { sweep } = require("../server/library");
     w: Math.round(v2win.x1 - v2win.x0),
     h: Math.round(v2win.y1 - v2win.y0),
   });
-  const v2after = await measureVideoFrames(
-    v2fixed.buffer,
-    await v2rimg.getBuffer("image/png"),
-    { ...v2sidecar, subject: v2fixed.groundTruth.subject, banner: v2fixed.groundTruth.sign }
-  );
+  const v2repairedPosted = await v2rimg.getBuffer("image/png");
+  const v2after = await measureVideoFrames(v2fixed.buffer, v2repairedPosted, {
+    ...v2sidecar,
+    subject: v2fixed.groundTruth.subject,
+    banner: v2fixed.groundTruth.sign,
+    contentBox: v2fixed.contentBox,
+  });
   assert.strictEqual(v2after.cropSafety.verdict, "pass", "after the reframe, the measured crop verdict flips to pass");
   assert.strictEqual(v2after.framing.verdict, "pass", "after the reframe, the posted-frame framing verdict flips to pass");
+  assert.strictEqual(v2after.quality.verdict, "pass", "after the reframe, quality still passes — the repair's own border is not graded");
+  assert(v2after.quality.detail.includes("picture itself"), "the quality detail states the scoped basis plainly");
   ok("ST-V2: the reframe is performed and the re-check passes crop and framing");
+
+  // The same repaired frame measured WITHOUT the repair's declared box
+  // still fails quality: the box, and only the box, changes the basis —
+  // the threshold never moved (Nexus ruling, Oct 29, 2026).
+  const v2unscoped = await measureVideoFrames(v2fixed.buffer, v2repairedPosted, {
+    ...v2sidecar,
+    subject: v2fixed.groundTruth.subject,
+    banner: v2fixed.groundTruth.sign,
+  });
+  assert.strictEqual(v2unscoped.quality.verdict, "fix", "without the declared box, the same frame still fails — the threshold did not move");
+  ok("ST-V2: scoped and unscoped measurements of one frame differ only by the declared box");
+
+  // 9. Blur discrimination, both directions: blurring a sharp take fails
+  // quality, and reframing the blurred take does not rescue it — the
+  // scoped measurement judges the picture, and the picture is blurred.
+  const blurImg = await Jimp.fromBuffer(p2buf);
+  blurImg.blur(3);
+  const blurredBuf = await blurImg.getBuffer("image/png");
+  const blurredM = await measureImage(blurredBuf, p2gt);
+  assert.strictEqual(blurredM.quality.verdict, "fix", "a blurred take fails quality");
+  assert(blurredM.quality.detail.includes("edges are smeared"), "the blur failure names the smeared edges");
+  const blurredFixed = await applyRepair(blurredBuf, p2gt, "reframe-margin", blurredM);
+  const blurredAfter = await measureImage(blurredFixed.buffer, blurredFixed.groundTruth, blurredFixed.contentBox);
+  assert.strictEqual(blurredAfter.quality.verdict, "fix", "a reframed blurred take still fails quality on the scoped measurement");
+  assert(blurredAfter.quality.detail.includes("edges are smeared"), "the scoped failure still names the smeared edges");
+  ok("blur discrimination: the scoped measurement never rescues a genuinely blurred picture");
 
   console.log(`\n${passed} test groups passed.`);
 }

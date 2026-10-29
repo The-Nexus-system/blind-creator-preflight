@@ -6,5 +6,11 @@
     "y1": 746
   },
   "sign": null,
-  "privateItem": null
+  "privateItem": null,
+  "contentBox": {
+    "x0": 60,
+    "y0": 60,
+    "x1": 940,
+    "y1": 940
+  }
 }

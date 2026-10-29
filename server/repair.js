@@ -78,7 +78,17 @@ async function reframe(buffer, groundTruth, factor, tx, ty, dx, dy) {
     sign: transformBox(groundTruth.sign, factor, offX, offY),
     privateItem: transformBox(groundTruth.privateItem, factor, offX, offY),
   };
-  return { buffer: await canvas.getBuffer("image/png"), groundTruth: gt };
+  // The rectangle the picture itself occupies inside the repaired frame.
+  // Everything outside it is this repair's own flat fill; the repair
+  // declares the box so the quality measurement can judge the picture
+  // rather than the scaffolding around it (Nexus ruling, Oct 29, 2026).
+  const contentBox = {
+    x0: offX,
+    y0: offY,
+    x1: offX + scaled.bitmap.width,
+    y1: offY + scaled.bitmap.height,
+  };
+  return { buffer: await canvas.getBuffer("image/png"), groundTruth: gt, contentBox };
 }
 
 // Which repairs apply, given a measurement of the original take. The
