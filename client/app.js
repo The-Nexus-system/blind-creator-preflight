@@ -146,6 +146,16 @@ async function applyRepair(take, repair) {
   const changes = el("ul");
   for (const change of data.changes) changes.appendChild(el("li", change));
   repairsEl.appendChild(changes);
+  if (data.outcome) {
+    repairsEl.appendChild(
+      el(
+        "p",
+        data.outcome.worse
+          ? `Measured outcome: ${data.outcome.checkName} went from ${data.outcome.before} to ${data.outcome.after} — the repair did not improve this take, and undo is right there.`
+          : `Measured outcome: ${data.outcome.checkName} went from ${data.outcome.before} to ${data.outcome.after}.`
+      )
+    );
+  }
   repairsEl.appendChild(el("p", "The checks have run again on the repaired take — see the results above."));
   const undo = el("button", "Undo — return to the original take");
   undo.type = "button";
@@ -256,6 +266,64 @@ async function loadCopy(take, checkData) {
 
   copyAreaEl.replaceChildren(frag);
   refreshReadiness();
+  loadPublicDescription(take, checkData);
+}
+
+// --- Public description (Tier 2) -------------------------------------------
+// The audience-facing sibling of the proof copy: same verified facts,
+// written for the people who will see the post. Optional — readiness never
+// depends on it — and, like the alt text, used only with the creator's
+// approval of its exact current words.
+
+const publicAreaEl = document.getElementById("public-area");
+
+async function loadPublicDescription(take, checkData) {
+  if (session) session.publicApproved = false;
+  publicAreaEl.replaceChildren(el("p", "Building the public description…"));
+  const variantQuery = checkData.variant ? `?variant=${encodeURIComponent(checkData.variant)}` : "";
+  const res = await fetch(`/api/takes/${take.id}/public-description${variantQuery}`);
+  const data = await res.json();
+  const pd = data.publicDescription;
+
+  const frag = document.createDocumentFragment();
+  if (!pd.available) {
+    frag.appendChild(el("p", pd.reason));
+    publicAreaEl.replaceChildren(frag);
+    return;
+  }
+  frag.appendChild(el("p", pd.note));
+  const label = el("label", "Public description — edit it into your own words:");
+  label.htmlFor = "public-editor";
+  frag.appendChild(label);
+  const editor = document.createElement("textarea");
+  editor.id = "public-editor";
+  editor.rows = 4;
+  editor.cols = 60;
+  editor.value = pd.text;
+  const approveBtn = el("button", "Approve this public description");
+  approveBtn.type = "button";
+  const approveState = el("p", "Not approved yet. It will not be used anywhere until you approve it.");
+  editor.addEventListener("input", () => {
+    if (session && session.publicApproved) {
+      session.publicApproved = false;
+      approveBtn.textContent = "Approve this public description";
+      approveState.textContent = "Edited since approval — approval cleared.";
+    }
+  });
+  frag.appendChild(editor);
+  approveBtn.addEventListener("click", () => {
+    if (session) session.publicApproved = true;
+    approveBtn.textContent = "Public description approved";
+    approveState.textContent = "You approved this description exactly as it stands. It is ready to paste into your post's caption or first comment, or to carry to another platform.";
+  });
+  frag.appendChild(approveBtn);
+  frag.appendChild(approveState);
+  const blob = new Blob([pd.text], { type: "text/plain; charset=utf-8" });
+  const download = el("a", "Download the description as a plain text file, to carry to another platform.");
+  download.href = URL.createObjectURL(blob);
+  download.download = `public-description-${take.id}.txt`;
+  frag.appendChild(download);
+  publicAreaEl.replaceChildren(frag);
 }
 
 loadTakes().catch(() => {

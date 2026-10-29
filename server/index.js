@@ -19,7 +19,7 @@ const path = require("path");
 const { TAKES, CHECKS } = require("./seed-takes");
 const { measureImage } = require("./measure");
 const { runSemanticChecks } = require("./semantic");
-const { buildProofCopy, draftAltText, readiness } = require("./copy");
+const { buildProofCopy, draftAltText, readiness, buildPublicDescription } = require("./copy");
 const { availableRepairs, applyRepair } = require("./repair");
 
 const MEDIA_DIR = path.join(__dirname, "seed-media");
@@ -224,7 +224,23 @@ const server = http.createServer((req, res) => {
         measurementCache.delete(`${take.id}|${input.repairId}`);
         semanticCache.delete(`${take.id}|${input.repairId}`);
         const result = await buildChecks(take, input.repairId);
-        sendJson(res, 200, { variantId: input.repairId, changes: out.changes, result });
+        const original = await buildChecks(take);
+        const targetId = (availableRepairs(m, media.groundTruth).find((r) => r.id === input.repairId) || {}).fixesCheck;
+        const rank = { fix: 0, uncertain: 1, pass: 2 };
+        const beforeCheck = original.checks.find((c) => c.id === targetId);
+        const afterCheck = result.checks.find((c) => c.id === targetId);
+        const outcome =
+          beforeCheck && afterCheck
+            ? {
+                checkId: targetId,
+                checkName: beforeCheck.name,
+                before: beforeCheck.verdict,
+                after: afterCheck.verdict,
+                improved: rank[afterCheck.verdict] > rank[beforeCheck.verdict],
+                worse: rank[afterCheck.verdict] < rank[beforeCheck.verdict],
+              }
+            : null;
+        sendJson(res, 200, { variantId: input.repairId, changes: out.changes, outcome, result });
       })().catch((err) => sendJson(res, 500, { error: `Repair failed: ${err.message}` }));
     });
     return;
@@ -244,6 +260,16 @@ const server = http.createServer((req, res) => {
         })
       )
       .catch((err) => sendJson(res, 500, { error: `Copy failed: ${err.message}` }));
+    return;
+  }
+
+  const publicDescMatch = url.pathname.match(/^\/api\/takes\/([A-Za-z0-9-]+)\/public-description$/);
+  if (publicDescMatch && req.method === "GET") {
+    const take = TAKES.find((t) => t.id === publicDescMatch[1]);
+    if (!take) return sendJson(res, 404, { error: "Unknown take id." });
+    buildChecks(take, url.searchParams.get("variant") || undefined)
+      .then((result) => sendJson(res, 200, { take: publicTake(take), variant: result.variant, publicDescription: buildPublicDescription(take, result) }))
+      .catch((err) => sendJson(res, 500, { error: `Public description failed: ${err.message}` }));
     return;
   }
 

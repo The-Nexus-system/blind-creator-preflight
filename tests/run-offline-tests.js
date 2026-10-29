@@ -20,7 +20,7 @@ const path = require("path");
 
 const { parseSemanticReply, runSemanticChecks } = require("../server/semantic");
 const { measureImage } = require("../server/measure");
-const { buildProofCopy, draftAltText, readiness } = require("../server/copy");
+const { buildProofCopy, draftAltText, readiness, buildPublicDescription } = require("../server/copy");
 const { availableRepairs, applyRepair, applyGain } = require("../server/repair");
 
 const expected = JSON.parse(
@@ -156,8 +156,29 @@ async function main() {
   assert(availableRepairs(darkM, p1gt).some((r) => r.id === "brightness-auto"));
   const brightFixed = await applyRepair(darkBuf, p1gt, "brightness-auto", darkM);
   const brightAfter = await measureImage(brightFixed.buffer, brightFixed.groundTruth);
-  assert.strictEqual(brightAfter.quality.verdict, "pass", "after the brightness repair, quality passes");
-  ok("brightness repair rescues a darkened take, measured end to end");
+  assert.strictEqual(brightAfter.quality.verdict, "pass", "after the automatic exposure repair, quality passes");
+  assert(brightFixed.changes[0].includes("total gain"), "the exposure repair reports its measured before/after");
+  ok("automatic exposure repair rescues a darkened take, measured end to end");
+
+  const blownBuf = await applyGain(fs.readFileSync(path.join(mediaDir, "ST-P1.png")), 3.2);
+  const blownM = await measureImage(blownBuf, p1gt);
+  assert.strictEqual(blownM.quality.verdict, "fix", "a blown-out take fails quality");
+  assert(blownM.quality.detail.includes("blown out"), "the failure names the blown exposure");
+  assert(availableRepairs(blownM, p1gt).some((r) => r.id === "brightness-auto"), "the exposure repair is offered for a blown take too");
+  const blownFixed = await applyRepair(blownBuf, p1gt, "brightness-auto", blownM);
+  const blownAfter = await measureImage(blownFixed.buffer, blownFixed.groundTruth);
+  assert(!blownAfter.quality.detail.includes("blown out"), "after the repair, the exposure itself measures in range");
+  assert(!blownAfter.quality.detail.includes("very dark"), "and it is not overcorrected into darkness");
+  ok("automatic exposure repair handles the blown-out direction too, without overcorrecting");
+
+  // 6. Tier 2 public description: audience text from verified facts only.
+  const pd = buildPublicDescription(fakeTake, passResult);
+  assert.strictEqual(pd.available, true);
+  assert(pd.text.startsWith("Show the thing."), "public description leads with the scene the creator intended");
+  assert(!/measured|model check|source/i.test(pd.text), "public text carries no pipeline jargon");
+  const pdVideo = buildPublicDescription({ ...fakeTake, kind: "video" }, passResult);
+  assert.strictEqual(pdVideo.available, false, "a video with no media gets no invented description");
+  ok("Tier 2 public description: facts only for photos, honest unavailability for media-less video");
 
   console.log(`\n${passed} test groups passed.`);
 }

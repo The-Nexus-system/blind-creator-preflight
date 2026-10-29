@@ -105,7 +105,7 @@ function availableRepairs(measurement, groundTruth) {
   ) {
     repairs.push({
       id: "brightness-auto",
-      name: "Brightness: bring the exposure toward the middle",
+      name: "Exposure: fix it automatically — Pre-Flight measures, adjusts, and measures again",
       fixesCheck: "quality",
     });
   }
@@ -151,19 +151,39 @@ async function applyRepair(buffer, groundTruth, repairId, measurement) {
   }
 
   if (repairId === "brightness-auto") {
-    const mean = measurement.meanBrightness;
-    // A plain per-channel gain toward a middle exposure. (The image
-    // library's own brightness() was measured and rejected: at -0.45 it
-    // crushed a seeded take to pure black, and no counter-adjustment
-    // recovered it. This gain is ours, stated exactly, and reversible by
-    // undo like every repair.)
-    const gain = Math.max(0.25, Math.min(4, 0.5 / Math.max(mean, 0.01)));
-    const out = await applyGain(buffer, gain);
+    // Exposure is never the creator's problem to tune — a blind creator
+    // cannot judge a brightness slider, and no user should have to. This
+    // repair is fully automatic and self-verifying: it measures, applies a
+    // stated per-channel gain, measures again, and adjusts once more if
+    // the exposure is still out of range. What it returns is the best
+    // measured result, and the changes text reports the measured outcome
+    // either way — including when the original's clipped detail cannot be
+    // recovered, which no honest repair may pretend to fix.
+    // (The image library's own brightness() was measured and rejected: at
+    // -0.45 it crushed a seeded take to pure black, unrecoverably.)
+    const { measureImage } = require("./measure");
+    let current = buffer;
+    let totalGain = 1;
+    let beforeMean = measurement.meanBrightness;
+    let afterMean = beforeMean;
+    for (let pass = 0; pass < 2; pass++) {
+      const mean = pass === 0 ? beforeMean : afterMean;
+      if (mean >= 0.12 && mean <= 0.93) break;
+      const gain = Math.max(0.2, Math.min(5, 0.5 / Math.max(mean, 0.01)));
+      current = await applyGain(current, gain);
+      totalGain *= gain;
+      const remeasured = await measureImage(current, groundTruth);
+      afterMean = remeasured.meanBrightness;
+    }
+    const recovered = afterMean >= 0.12 && afterMean <= 0.93;
     return {
-      buffer: out,
+      buffer: current,
       groundTruth,
       changes: [
-        `Multiplied every pixel's brightness by ${gain.toFixed(2)} toward a middle exposure (measured mean was ${mean.toFixed(2)} of 1).`,
+        `Exposure adjusted automatically by a total gain of ${totalGain.toFixed(2)}: measured mean brightness moved from ${beforeMean.toFixed(2)} to ${afterMean.toFixed(2)} of 1.`,
+        recovered
+          ? "The exposure now measures inside the plain thresholds. No slider was offered and none was needed."
+          : "The exposure could not be brought fully into range — detail the original exposure clipped away cannot be recovered by any adjustment, and this repair does not pretend otherwise.",
         "Nothing was moved, cropped, or invented; only the exposure changed.",
       ],
     };
