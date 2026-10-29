@@ -78,7 +78,7 @@ const TAKES = [
     id: "ST-V2",
     kind: "video",
     title: "Banner loses its main word to the crop",
-    intent: "The creator in front of a banner; the banner's main word names the event.",
+    intent: "Announcement Reel. The banner behind me says the name of the tour; it has to read in full.",
     designedPrivacyWarning: null,
   },
   {
