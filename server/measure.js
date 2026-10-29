@@ -163,4 +163,4 @@ async function measureImage(buffer, groundTruth) {
   return result;
 }
 
-module.exports = { measureImage, CROPS };
+module.exports = { measureImage, CROPS, centreCropWindow };

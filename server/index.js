@@ -20,10 +20,40 @@ const { TAKES, CHECKS } = require("./seed-takes");
 const { measureImage } = require("./measure");
 const { runSemanticChecks } = require("./semantic");
 const { buildProofCopy, draftAltText, readiness } = require("./copy");
+const { availableRepairs, applyRepair } = require("./repair");
 
 const MEDIA_DIR = path.join(__dirname, "seed-media");
+const REPAIRED_DIR = path.join(MEDIA_DIR, "repaired");
 const measurementCache = new Map();
 const semanticCache = new Map();
+
+// Resolves a take's media: the original seeded image, or a repaired
+// variant of it (variants live under seed-media/repaired and are produced
+// only by the repair endpoints; originals are never modified).
+function resolveMedia(take, variantId) {
+  const base = variantId
+    ? path.join(REPAIRED_DIR, `${take.id}--${variantId}`)
+    : path.join(MEDIA_DIR, take.id);
+  const pngPath = `${base}.png`;
+  const sidecarPath = `${base}.json`;
+  if (take.kind !== "photo" || !fs.existsSync(pngPath)) return null;
+  return {
+    buffer: fs.readFileSync(pngPath),
+    groundTruth: fs.existsSync(sidecarPath)
+      ? JSON.parse(fs.readFileSync(sidecarPath, "utf8"))
+      : null,
+  };
+}
+
+async function measureTake(take, variantId) {
+  const key = `${take.id}|${variantId || ""}`;
+  if (!measurementCache.has(key)) {
+    const media = resolveMedia(take, variantId);
+    if (!media || !media.groundTruth) return null;
+    measurementCache.set(key, await measureImage(media.buffer, media.groundTruth));
+  }
+  return measurementCache.get(key);
+}
 
 // Builds a take's check list from the real pipelines. Every check carries
 // its source, and no source is a stand-in verdict:
@@ -33,7 +63,7 @@ const semanticCache = new Map();
 // - "model-off" / "model-error" / "model-unreadable": the semantic check
 //   honestly reporting "uncertain" with its reason — the design has always
 //   allowed uncertain, and a failed or unfunded call never becomes a guess.
-async function buildChecks(take) {
+async function buildChecks(take, variantId) {
   const byId = {};
   for (const c of CHECKS) {
     byId[c.id] = { id: c.id, name: c.name, verdict: "uncertain", detail: "", source: "pending" };
@@ -41,28 +71,22 @@ async function buildChecks(take) {
   let privacyWarning = null;
   let privacyWarningSource = null;
 
-  const pngPath = path.join(MEDIA_DIR, `${take.id}.png`);
-  const sidecarPath = path.join(MEDIA_DIR, `${take.id}.json`);
-  const hasMedia = take.kind === "photo" && fs.existsSync(pngPath);
+  const media = resolveMedia(take, variantId);
+  const hasMedia = Boolean(media);
 
   if (hasMedia) {
-    const buffer = fs.readFileSync(pngPath);
-
-    if (fs.existsSync(sidecarPath)) {
-      if (!measurementCache.has(take.id)) {
-        const groundTruth = JSON.parse(fs.readFileSync(sidecarPath, "utf8"));
-        measurementCache.set(take.id, await measureImage(buffer, groundTruth));
-      }
-      const m = measurementCache.get(take.id);
+    const m = await measureTake(take, variantId);
+    if (m) {
       if (m.framing) Object.assign(byId.framing, { verdict: m.framing.verdict, detail: m.framing.detail, source: "measured" });
       if (m.cropSafety) Object.assign(byId.crop, { verdict: m.cropSafety.verdict, detail: m.cropSafety.detail, source: "measured" });
       Object.assign(byId.quality, { verdict: m.quality.verdict, detail: m.quality.detail, source: "measured" });
     }
 
-    if (!semanticCache.has(take.id)) {
-      semanticCache.set(take.id, await runSemanticChecks(buffer, take.intent));
+    const semKey = `${take.id}|${variantId || ""}`;
+    if (!semanticCache.has(semKey)) {
+      semanticCache.set(semKey, await runSemanticChecks(media.buffer, take.intent));
     }
-    const sem = semanticCache.get(take.id);
+    const sem = semanticCache.get(semKey);
     Object.assign(byId.text, { verdict: sem.text.verdict, detail: sem.text.detail, source: sem.source });
     Object.assign(byId.firstImpression, {
       verdict: sem.firstImpression.verdict,
@@ -96,6 +120,7 @@ async function buildChecks(take) {
   const anyRealCheck = checks.some((c) => ["measured", "model"].includes(c.source));
   return {
     take: publicTake(take),
+    variant: variantId || null,
     source: allSettled && anyRealCheck ? "live" : "partial",
     checks,
     privacyWarning,
@@ -147,9 +172,61 @@ const server = http.createServer((req, res) => {
   if (checkMatch) {
     const take = TAKES.find((t) => t.id === checkMatch[1]);
     if (!take) return sendJson(res, 404, { error: "Unknown take id." });
-    buildChecks(take)
+    buildChecks(take, url.searchParams.get("variant") || undefined)
       .then((body) => sendJson(res, 200, body))
       .catch((err) => sendJson(res, 500, { error: `Checks failed: ${err.message}` }));
+    return;
+  }
+
+  const repairsMatch = url.pathname.match(/^\/api\/takes\/([A-Za-z0-9-]+)\/repairs$/);
+  if (repairsMatch && req.method === "GET") {
+    const take = TAKES.find((t) => t.id === repairsMatch[1]);
+    if (!take) return sendJson(res, 404, { error: "Unknown take id." });
+    (async () => {
+      const media = resolveMedia(take);
+      if (!media || !media.groundTruth) return sendJson(res, 200, { repairs: [] });
+      const m = await measureTake(take);
+      sendJson(res, 200, { repairs: availableRepairs(m, media.groundTruth) });
+    })().catch((err) => sendJson(res, 500, { error: `Repairs failed: ${err.message}` }));
+    return;
+  }
+
+  const repairMatch = url.pathname.match(/^\/api\/takes\/([A-Za-z0-9-]+)\/repair$/);
+  if (repairMatch && req.method === "POST") {
+    const take = TAKES.find((t) => t.id === repairMatch[1]);
+    if (!take) return sendJson(res, 404, { error: "Unknown take id." });
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      (async () => {
+        let input = {};
+        try {
+          input = JSON.parse(body || "{}");
+        } catch {
+          return sendJson(res, 400, { error: "Request body must be JSON." });
+        }
+        const media = resolveMedia(take);
+        if (!media || !media.groundTruth) {
+          return sendJson(res, 400, { error: "This take has no media to repair." });
+        }
+        const m = await measureTake(take);
+        const offered = availableRepairs(m, media.groundTruth).map((r) => r.id);
+        if (!offered.includes(input.repairId)) {
+          return sendJson(res, 400, { error: `Repair ${input.repairId} is not offered for this take's current verdicts.` });
+        }
+        const out = await applyRepair(media.buffer, media.groundTruth, input.repairId, m);
+        fs.mkdirSync(REPAIRED_DIR, { recursive: true });
+        fs.writeFileSync(path.join(REPAIRED_DIR, `${take.id}--${input.repairId}.png`), out.buffer);
+        fs.writeFileSync(
+          path.join(REPAIRED_DIR, `${take.id}--${input.repairId}.json`),
+          JSON.stringify(out.groundTruth, null, 2)
+        );
+        measurementCache.delete(`${take.id}|${input.repairId}`);
+        semanticCache.delete(`${take.id}|${input.repairId}`);
+        const result = await buildChecks(take, input.repairId);
+        sendJson(res, 200, { variantId: input.repairId, changes: out.changes, result });
+      })().catch((err) => sendJson(res, 500, { error: `Repair failed: ${err.message}` }));
+    });
     return;
   }
 
@@ -157,10 +234,11 @@ const server = http.createServer((req, res) => {
   if (copyMatch && req.method === "GET") {
     const take = TAKES.find((t) => t.id === copyMatch[1]);
     if (!take) return sendJson(res, 404, { error: "Unknown take id." });
-    buildChecks(take)
+    buildChecks(take, url.searchParams.get("variant") || undefined)
       .then((result) =>
         sendJson(res, 200, {
           take: publicTake(take),
+          variant: result.variant,
           proofCopy: buildProofCopy(take, result),
           altText: draftAltText(take, result),
         })
@@ -182,7 +260,7 @@ const server = http.createServer((req, res) => {
       } catch {
         return sendJson(res, 400, { error: "Request body must be JSON." });
       }
-      buildChecks(take)
+      buildChecks(take, typeof input.variant === "string" ? input.variant : undefined)
         .then((result) =>
           sendJson(
             res,

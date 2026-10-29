@@ -21,6 +21,7 @@ const path = require("path");
 const { parseSemanticReply, runSemanticChecks } = require("../server/semantic");
 const { measureImage } = require("../server/measure");
 const { buildProofCopy, draftAltText, readiness } = require("../server/copy");
+const { availableRepairs, applyRepair, applyGain } = require("../server/repair");
 
 const expected = JSON.parse(
   fs.readFileSync(path.join(__dirname, "expected-verdicts.json"), "utf8")
@@ -126,6 +127,37 @@ async function main() {
   };
   assert.strictEqual(readiness(fixResult, { warningAcknowledged: false, altTextApproved: true }).ready, false);
   ok("readiness: warning acknowledgement and outstanding fixes both gate, approval alone never suffices");
+
+  // 5. Repairs: offered from verdicts, and the re-check flips the verdict.
+  const p4buf = fs.readFileSync(path.join(mediaDir, "ST-P4.png"));
+  const p4gt = JSON.parse(fs.readFileSync(path.join(mediaDir, "ST-P4.json"), "utf8"));
+  const p4m = await measureImage(p4buf, p4gt);
+  const p4offers = availableRepairs(p4m, p4gt).map((r) => r.id);
+  assert(p4offers.includes("reframe-fit-crops"), "P4 offers the crop reframe");
+  const p4fixed = await applyRepair(p4buf, p4gt, "reframe-fit-crops", p4m);
+  const p4after = await measureImage(p4fixed.buffer, p4fixed.groundTruth);
+  assert.strictEqual(p4after.cropSafety.verdict, "pass", "after the reframe, the measured crop verdict flips to pass");
+  assert(p4fixed.changes.length >= 2, "the repair describes what changed in measurable terms");
+  ok("ST-P4: crop repair is offered, performed, and the re-check passes");
+
+  const p2buf = fs.readFileSync(path.join(mediaDir, "ST-P2.png"));
+  const p2gt = JSON.parse(fs.readFileSync(path.join(mediaDir, "ST-P2.json"), "utf8"));
+  const p2m = await measureImage(p2buf, p2gt);
+  assert(availableRepairs(p2m, p2gt).some((r) => r.id === "reframe-margin"));
+  const p2fixed = await applyRepair(p2buf, p2gt, "reframe-margin", p2m);
+  const p2after = await measureImage(p2fixed.buffer, p2fixed.groundTruth);
+  assert.strictEqual(p2after.framing.verdict, "pass", "after the reframe, the measured framing verdict flips to pass");
+  ok("ST-P2: framing repair is offered, performed, and the re-check passes");
+
+  const darkBuf = await applyGain(fs.readFileSync(path.join(mediaDir, "ST-P1.png")), 0.12);
+  const p1gt = JSON.parse(fs.readFileSync(path.join(mediaDir, "ST-P1.json"), "utf8"));
+  const darkM = await measureImage(darkBuf, p1gt);
+  assert.strictEqual(darkM.quality.verdict, "fix", "a darkened take fails quality");
+  assert(availableRepairs(darkM, p1gt).some((r) => r.id === "brightness-auto"));
+  const brightFixed = await applyRepair(darkBuf, p1gt, "brightness-auto", darkM);
+  const brightAfter = await measureImage(brightFixed.buffer, brightFixed.groundTruth);
+  assert.strictEqual(brightAfter.quality.verdict, "pass", "after the brightness repair, quality passes");
+  ok("brightness repair rescues a darkened take, measured end to end");
 
   console.log(`\n${passed} test groups passed.`);
 }
