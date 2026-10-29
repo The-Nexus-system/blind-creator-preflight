@@ -13,7 +13,8 @@
     "make-seed-images": "node tools/make-seed-images.js",
     "start": "node server/index.js",
     "test": "node tests/run-offline-tests.js",
-    "make-seed-videos": "node tools/make-seed-videos.js"
+    "make-seed-videos": "node tools/make-seed-videos.js",
+    "make-seed-frames": "node tools/extract-seed-frames.js"
   },
   "type": "commonjs",
   "version": "0.1.0"
