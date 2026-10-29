@@ -95,14 +95,14 @@ function buildPublicDescription(take, result) {
   // Tier 2: the public, audience-facing description — the proof copy's
   // sibling, built from the same facts but written for the audience:
   // concise, in the open, and creator-approved before it is ever used.
-  // For a video it is timestamped by segment; the seeded video takes have
-  // no media yet, so no timestamps exist to publish and the description
+  // For a video it is timestamped by segment; the timestamped form is
+  // not built yet in this version of Pre-Flight, so the description
   // honestly reports itself unavailable rather than inventing a timeline.
   if (take.kind === "video") {
     return {
       available: false,
       reason:
-        "This seeded video has no media file yet, so there is no visual track to describe and no timestamps to publish.",
+        "The timestamped public description for a video is not built yet in this version of Pre-Flight, so there are no timestamps to publish — nothing is described that no check has seen.",
     };
   }
   const byId = Object.fromEntries(result.checks.map((c) => [c.id, c]));
