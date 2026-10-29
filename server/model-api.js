@@ -80,6 +80,38 @@ async function transcribeFile(buffer, filename = "audio.wav") {
   return body.text;
 }
 
+// Turns a fetch response body (an SSE byte stream) into the Responses
+// API event objects the official parser consumes. Each SSE event's data
+// payload is one JSON event; keepalives and the terminal [DONE] marker
+// carry none and are skipped.
+async function* responseEvents(body) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
+    let splitAt;
+    while ((splitAt = buffer.indexOf("\n\n")) >= 0) {
+      const rawEvent = buffer.slice(0, splitAt);
+      buffer = buffer.slice(splitAt + 2);
+      const data = rawEvent
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim())
+        .join("\n");
+      if (!data || data === "[DONE]") continue;
+      try {
+        yield JSON.parse(data);
+      } catch {
+        // A non-JSON payload is not an event; transport noise is not
+        // output text, and the parser's diagnostics cover the output.
+      }
+    }
+  }
+}
+
 // Segments one concept in an image. Returns boxes in source pixels as
 // {x0, y0, x1, y1} — the same shape the seeded sidecars use, so measure.js
 // consumes SAM output and designed ground truth identically.
@@ -112,16 +144,22 @@ async function segmentImage(buffer, concept, width, height) {
     }),
   });
   if (!res.ok) throw new Error(`SAM call failed with HTTP ${res.status}.`);
-  // The parser consumes the streamed segmentation grammar and yields typed
-  // summaries whose boxes are {left, top, right, bottom} in source pixels.
-  const summary = await parser.summarizeStream(res.body);
-  const boxes = [];
-  for (const record of summary || []) {
-    for (const b of record.boxes || []) {
-      boxes.push({ x0: b.left, y0: b.top, x1: b.right, y1: b.bottom });
-    }
+  // The parser consumes Responses API events, not the raw byte stream:
+  // the SSE body is decoded into events first (see responseEvents), then
+  // the official parser turns the streamed segmentation grammar into
+  // typed records. Box records carry half-open source-pixel corners
+  // (left/top/right/bottom), mapped here to the sidecar box shape.
+  const result = await parser.parseImageStream(responseEvents(res.body)).finalResult;
+  if (result.outcome.status !== "completed") {
+    throw new Error(
+      `SAM stream did not complete (${result.outcome.reason}${
+        result.outcome.detail ? `: ${result.outcome.detail}` : ""
+      }).`
+    );
   }
-  return boxes;
+  return parser
+    .recordsOfKind(result.records, "box")
+    .map((b) => ({ x0: b.left, y0: b.top, x1: b.right, y1: b.bottom }));
 }
 
 module.exports = { chatCompletions, transcribeFile, segmentImage, ModelCallsDisabled };
