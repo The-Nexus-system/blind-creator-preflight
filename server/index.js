@@ -19,6 +19,7 @@ const path = require("path");
 const { TAKES, CHECKS } = require("./seed-takes");
 const { measureImage } = require("./measure");
 const { runSemanticChecks } = require("./semantic");
+const { buildProofCopy, draftAltText, readiness } = require("./copy");
 
 const MEDIA_DIR = path.join(__dirname, "seed-media");
 const measurementCache = new Map();
@@ -149,6 +150,51 @@ const server = http.createServer((req, res) => {
     buildChecks(take)
       .then((body) => sendJson(res, 200, body))
       .catch((err) => sendJson(res, 500, { error: `Checks failed: ${err.message}` }));
+    return;
+  }
+
+  const copyMatch = url.pathname.match(/^\/api\/takes\/([A-Za-z0-9-]+)\/copy$/);
+  if (copyMatch && req.method === "GET") {
+    const take = TAKES.find((t) => t.id === copyMatch[1]);
+    if (!take) return sendJson(res, 404, { error: "Unknown take id." });
+    buildChecks(take)
+      .then((result) =>
+        sendJson(res, 200, {
+          take: publicTake(take),
+          proofCopy: buildProofCopy(take, result),
+          altText: draftAltText(take, result),
+        })
+      )
+      .catch((err) => sendJson(res, 500, { error: `Copy failed: ${err.message}` }));
+    return;
+  }
+
+  const readinessMatch = url.pathname.match(/^\/api\/takes\/([A-Za-z0-9-]+)\/readiness$/);
+  if (readinessMatch && req.method === "POST") {
+    const take = TAKES.find((t) => t.id === readinessMatch[1]);
+    if (!take) return sendJson(res, 404, { error: "Unknown take id." });
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      let input = {};
+      try {
+        input = JSON.parse(body || "{}");
+      } catch {
+        return sendJson(res, 400, { error: "Request body must be JSON." });
+      }
+      buildChecks(take)
+        .then((result) =>
+          sendJson(
+            res,
+            200,
+            readiness(result, {
+              warningAcknowledged: Boolean(input.warningAcknowledged),
+              altTextApproved: Boolean(input.altTextApproved),
+            })
+          )
+        )
+        .catch((err) => sendJson(res, 500, { error: `Readiness failed: ${err.message}` }));
+    });
     return;
   }
 

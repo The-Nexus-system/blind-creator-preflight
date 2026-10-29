@@ -20,6 +20,7 @@ const path = require("path");
 
 const { parseSemanticReply, runSemanticChecks } = require("../server/semantic");
 const { measureImage } = require("../server/measure");
+const { buildProofCopy, draftAltText, readiness } = require("../server/copy");
 
 const expected = JSON.parse(
   fs.readFileSync(path.join(__dirname, "expected-verdicts.json"), "utf8")
@@ -88,6 +89,43 @@ async function main() {
     assert.deepStrictEqual(got, want, `${takeId} measured verdicts`);
     ok(`${takeId} measured verdicts match the design record`);
   }
+
+  // 4. Proof copy, alt text, and the readiness rule.
+  const fakeTake = { id: "ST-X", kind: "photo", title: "Fixture take", intent: "Show the thing." };
+  const passResult = {
+    checks: [
+      { id: "framing", name: "Framing", verdict: "pass", detail: "Inside the frame.", source: "measured" },
+      { id: "text", name: "Text in the image", verdict: "pass", detail: "No text.", source: "model" },
+    ],
+    privacyWarning: null,
+    privacyWarningSource: "model",
+  };
+  const proof = buildProofCopy(fakeTake, passResult);
+  assert(proof.includes("Framing: pass. Inside the frame. (Source: measured.)"), "proof copy quotes the check and its source");
+  assert(proof.includes("yours alone"), "proof copy states it is private");
+  ok("proof copy is assembled from the checks' own words, with sources");
+
+  const alt = draftAltText(fakeTake, passResult);
+  assert(alt.text.startsWith("Show the thing."), "alt draft leads with the creator's intent");
+  assert.strictEqual(alt.source, "assembled");
+  ok("alt text draft leads with intent and labels its source honestly");
+
+  assert.strictEqual(readiness(passResult, { warningAcknowledged: false, altTextApproved: true }).ready, true);
+  const warnResult = {
+    ...passResult,
+    privacyWarning: { name: "A readable address.", detail: "Posting makes it public." },
+    privacyWarningSource: "model",
+  };
+  const blocked = readiness(warnResult, { warningAcknowledged: false, altTextApproved: true });
+  assert.strictEqual(blocked.ready, false);
+  assert(blocked.reasons.some((r) => r.includes("has not been acknowledged")), "warning blocks until acknowledged");
+  assert.strictEqual(readiness(warnResult, { warningAcknowledged: true, altTextApproved: true }).ready, true);
+  const fixResult = {
+    ...passResult,
+    checks: [{ id: "crop", name: "Crop safety", verdict: "fix", detail: "Cut.", source: "measured" }],
+  };
+  assert.strictEqual(readiness(fixResult, { warningAcknowledged: false, altTextApproved: true }).ready, false);
+  ok("readiness: warning acknowledgement and outstanding fixes both gate, approval alone never suffices");
 
   console.log(`\n${passed} test groups passed.`);
 }
