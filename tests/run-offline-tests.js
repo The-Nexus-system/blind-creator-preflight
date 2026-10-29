@@ -198,6 +198,48 @@ const { sweep } = require("../server/library");
   assert.strictEqual(sl4.files, 2, "the duplicate pair is one item of two files");
   ok("Library Sweep slice: pinned sort, totals, and the warning standing alone");
 
+  // 8. ST-V2 video path: measured from its committed frames. Framing is
+  // judged on the posted frame, crop and quality on the recorded frame —
+  // the composition measureVideoFrames performs — and the verdicts match
+  // the design record (SEED-TAKES, ST-V2): framing and crop fail, the
+  // take itself is sharp and lit.
+  const { measureVideoFrames } = require("../server/measure");
+  const v2frame = fs.readFileSync(path.join(mediaDir, "ST-V2-frame.png"));
+  const v2posted = fs.readFileSync(path.join(mediaDir, "ST-V2-posted.png"));
+  const v2sidecar = JSON.parse(fs.readFileSync(path.join(mediaDir, "ST-V2.json"), "utf8"));
+  const v2m = await measureVideoFrames(v2frame, v2posted, v2sidecar);
+  assert.strictEqual(v2m.framing.verdict, "fix", "ST-V2 framing fails in the posted frame");
+  assert.strictEqual(v2m.cropSafety.verdict, "fix", "ST-V2 crop fails");
+  assert(v2m.cropSafety.detail.includes("banner"), "the crop failure names the banner, not a generic sign");
+  assert.strictEqual(v2m.quality.verdict, "pass", "ST-V2 itself is sharp and lit");
+  ok("ST-V2: framing, crop, and quality measured from its frames match the design record");
+
+  const v2gt = { subject: v2sidecar.subject, sign: v2sidecar.banner, labels: { sign: "banner" } };
+  const v2offers = availableRepairs(v2m, v2gt, { kind: "video", coverFrameAtSeconds: 10.5 }).map((r) => r.id);
+  assert(v2offers.includes("reframe-fit-crops"), "the crop reframe is offered for the Reel");
+  assert(v2offers.includes("cover-frame-hands-up"), "the cover-frame choice is offered for the Reel");
+  assert(!v2offers.includes("reframe-margin"), "the photo margin reframe is not offered for a Reel");
+  ok("ST-V2: the crop reframe and the cover-frame choice are offered; the photo margin reframe is not");
+
+  const v2fixed = await applyRepair(v2frame, v2gt, "reframe-fit-crops", v2m);
+  const { Jimp } = require("jimp");
+  const v2win = v2sidecar.postedCropWindow;
+  const v2rimg = await Jimp.fromBuffer(v2fixed.buffer);
+  v2rimg.crop({
+    x: Math.round(v2win.x0),
+    y: Math.round(v2win.y0),
+    w: Math.round(v2win.x1 - v2win.x0),
+    h: Math.round(v2win.y1 - v2win.y0),
+  });
+  const v2after = await measureVideoFrames(
+    v2fixed.buffer,
+    await v2rimg.getBuffer("image/png"),
+    { ...v2sidecar, subject: v2fixed.groundTruth.subject, banner: v2fixed.groundTruth.sign }
+  );
+  assert.strictEqual(v2after.cropSafety.verdict, "pass", "after the reframe, the measured crop verdict flips to pass");
+  assert.strictEqual(v2after.framing.verdict, "pass", "after the reframe, the posted-frame framing verdict flips to pass");
+  ok("ST-V2: the reframe is performed and the re-check passes crop and framing");
+
   console.log(`\n${passed} test groups passed.`);
 }
 
