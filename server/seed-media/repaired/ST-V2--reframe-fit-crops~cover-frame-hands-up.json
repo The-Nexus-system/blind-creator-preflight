@@ -1,0 +1,59 @@
+{
+  "width": 1280,
+  "height": 720,
+  "fps": 12,
+  "seconds": 15,
+  "silent": true,
+  "banner": {
+    "x0": 439,
+    "y0": 245,
+    "x1": 840,
+    "y1": 299
+  },
+  "bannerText": "SIGNAL OVER NOISE TOUR",
+  "bannerTextBox": {
+    "x0": 562,
+    "y0": 104,
+    "x1": 983,
+    "y1": 136
+  },
+  "noiseWordBox": {
+    "x0": 786,
+    "y0": 104,
+    "x1": 885,
+    "y1": 136
+  },
+  "tourWordBox": {
+    "x0": 894,
+    "y0": 104,
+    "x1": 984,
+    "y1": 136
+  },
+  "postedCropWindow": {
+    "x0": 437.5,
+    "x1": 842.5,
+    "y0": 0,
+    "y1": 720
+  },
+  "subject": {
+    "x0": 535,
+    "y0": 329,
+    "x1": 601,
+    "y1": 475
+  },
+  "handsUpSeconds": [
+    9,
+    12
+  ],
+  "contentBox": {
+    "x0": 381,
+    "y0": 223,
+    "x1": 879,
+    "y1": 503
+  },
+  "reframeTransform": {
+    "factor": 0.38927184466019416,
+    "offX": 381,
+    "offY": 223
+  }
+}

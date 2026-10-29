@@ -272,6 +272,52 @@ const { sweep } = require("../server/library");
   assert(blurredAfter.quality.detail.includes("edges are smeared"), "the scoped failure still names the smeared edges");
   ok("blur discrimination: the scoped measurement never rescues a genuinely blurred picture");
 
+  // 10. Repair stacking: a chain applies each repair to the result of
+  // the last. For ST-V2 the demo directs reframe, then the cover-frame
+  // choice — and the cover only pays off inside the reframed frame, so
+  // the choice replays the reframe's own transform on the hands-up
+  // moment (Nexus ruling, Oct 29, 2026: "that's the point of the app").
+  const { applyTransform, composeTransforms } = require("../server/repair");
+  const sampleBox = { x0: 100, y0: 50, x1: 300, y1: 200 };
+  const t1 = { factor: 0.5, offX: 10, offY: 20 };
+  const t2 = { factor: 0.5, offX: 5, offY: 5 };
+  const composed = composeTransforms(t1, t2);
+  assert.strictEqual(composed.factor, 0.25, "composed transform multiplies the factors");
+  assert.strictEqual(composed.offX, 10, "composed offset follows f2*o1 + o2");
+  const v2chainCtx = { kind: "video", coverFrameAtSeconds: 10.5, chain: ["reframe-fit-crops"] };
+  const v2chainOffers = availableRepairs(v2after, v2gt, v2chainCtx).map((r) => r.id);
+  assert(v2chainOffers.includes("cover-frame-hands-up"), "on the reframed variant, the cover choice is offered");
+  const v2fullCtx = { kind: "video", coverFrameAtSeconds: 10.5, chain: ["reframe-fit-crops", "cover-frame-hands-up"] };
+  assert(
+    !availableRepairs(v2after, v2gt, v2fullCtx).some((r) => r.id === "cover-frame-hands-up"),
+    "a chain never offers a repair it already contains"
+  );
+  ok("stacking: transforms compose, and a chain never re-offers its own repairs");
+
+  const v2cover = fs.readFileSync(path.join(mediaDir, "ST-V2-cover-frame.png"));
+  const v2stacked = await applyTransform(
+    v2cover,
+    { subject: v2sidecar.subject, sign: v2sidecar.banner, privateItem: v2sidecar.privateItem },
+    v2fixed.transform
+  );
+  const v2simg = await Jimp.fromBuffer(v2stacked.buffer);
+  v2simg.crop({
+    x: Math.round(v2win.x0),
+    y: Math.round(v2win.y0),
+    w: Math.round(v2win.x1 - v2win.x0),
+    h: Math.round(v2win.y1 - v2win.y0),
+  });
+  const v2stackedM = await measureVideoFrames(v2stacked.buffer, await v2simg.getBuffer("image/png"), {
+    ...v2sidecar,
+    subject: v2stacked.groundTruth.subject,
+    banner: v2stacked.groundTruth.sign,
+    contentBox: v2stacked.contentBox,
+  });
+  assert.strictEqual(v2stackedM.framing.verdict, "pass", "stacked variant: framing passes in the posted frame");
+  assert.strictEqual(v2stackedM.cropSafety.verdict, "pass", "stacked variant: the banner survives the crops");
+  assert.strictEqual(v2stackedM.quality.verdict, "pass", "stacked variant: quality passes on the scoped measurement");
+  ok("ST-V2 stacked chain: reframe, then the hands-up cover inside it — framing, crop, quality all pass");
+
   console.log(`\n${passed} test groups passed.`);
 }
 

@@ -15,9 +15,11 @@
 // exactly as it measured the original. For real uploads, segmentation
 // re-runs on the repaired image instead; the loop is the same.
 //
-// Repairs always apply to the ORIGINAL take. "Adjust" means choosing a
-// different repair from the original; "undo" means returning to it. The
-// original is never modified.
+// Repairs apply to the take the creator is currently looking at — the
+// original, or the result of repairs already directed (a chain). "Undo"
+// means returning to the original, which is never modified. A chain is
+// how the creator directs fixes the way a sighted creator applies them:
+// one after another, each on the result of the last.
 
 const { Jimp } = require("jimp");
 const { centreCropWindow, CROPS } = require("./measure");
@@ -65,13 +67,26 @@ function transformBox(box, factor, offX, offY) {
 async function reframe(buffer, groundTruth, factor, tx, ty, dx, dy) {
   const img = await Jimp.fromBuffer(buffer);
   const { width, height } = img.bitmap;
-  const fill = img.getPixelColor(0, 0); // the take's own edge colour
   const scaled = img.clone().scale(factor);
-  const canvas = new Jimp({ width, height, color: fill });
   const maxOffX = width - scaled.bitmap.width;
   const maxOffY = height - scaled.bitmap.height;
   const offX = Math.round(Math.max(0, Math.min(maxOffX, dx - tx * factor)));
   const offY = Math.round(Math.max(0, Math.min(maxOffY, dy - ty * factor)));
+  return applyTransform(buffer, groundTruth, { factor, offX, offY });
+}
+
+// Applies an exact reframe transform — scale by factor, composite at the
+// given offsets onto a same-size canvas filled from the take's own edge
+// colour. A reframe IS one transform applied to a whole take, so a chain
+// can replay it exactly on another frame of the same take (the cover
+// frame) and land in precisely the same geometry.
+async function applyTransform(buffer, groundTruth, transform) {
+  const img = await Jimp.fromBuffer(buffer);
+  const { width, height } = img.bitmap;
+  const { factor, offX, offY } = transform;
+  const fill = img.getPixelColor(0, 0); // the take's own edge colour
+  const scaled = img.clone().scale(factor);
+  const canvas = new Jimp({ width, height, color: fill });
   canvas.composite(scaled, offX, offY);
   const gt = {
     subject: transformBox(groundTruth.subject, factor, offX, offY),
@@ -88,7 +103,26 @@ async function reframe(buffer, groundTruth, factor, tx, ty, dx, dy) {
     x1: offX + scaled.bitmap.width,
     y1: offY + scaled.bitmap.height,
   };
-  return { buffer: await canvas.getBuffer("image/png"), groundTruth: gt, contentBox };
+  return {
+    buffer: await canvas.getBuffer("image/png"),
+    groundTruth: gt,
+    contentBox,
+    transform: { factor, offX, offY },
+  };
+}
+
+// The single transform equivalent to applying t1, then t2: a point p
+// lands at f2 * (f1 * p + o1) + o2. Chains record the composed transform
+// so a later frame of the take can be brought into the chain's exact
+// geometry in one replay.
+function composeTransforms(t1, t2) {
+  if (!t1) return t2 || null;
+  if (!t2) return t1;
+  return {
+    factor: t1.factor * t2.factor,
+    offX: Math.round(t2.factor * t1.offX + t2.offX),
+    offY: Math.round(t2.factor * t1.offY + t2.offY),
+  };
 }
 
 // Which repairs apply, given a measurement of the original take. The
@@ -140,7 +174,10 @@ function availableRepairs(measurement, groundTruth, context) {
       fixesCheck: "firstImpression",
     });
   }
-  return repairs;
+  // A chain never offers a repair it already contains: directing the
+  // same fix twice would stack a no-op on the creator's time.
+  const chain = context && Array.isArray(context.chain) ? context.chain : [];
+  return repairs.filter((r) => !chain.includes(r.id));
 }
 
 async function applyRepair(buffer, groundTruth, repairId, measurement) {
@@ -238,4 +275,4 @@ async function applyGain(buffer, gain) {
   return img.getBuffer("image/png");
 }
 
-module.exports = { availableRepairs, applyRepair, safeArea, unionBox, applyGain };
+module.exports = { availableRepairs, applyRepair, applyTransform, composeTransforms, safeArea, unionBox, applyGain };

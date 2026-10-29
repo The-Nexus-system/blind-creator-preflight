@@ -21,7 +21,7 @@ const { measureImage, measureVideoFrames } = require("./measure");
 const { Jimp } = require("jimp");
 const { runSemanticChecks } = require("./semantic");
 const { buildProofCopy, draftAltText, readiness, buildPublicDescription } = require("./copy");
-const { availableRepairs, applyRepair } = require("./repair");
+const { availableRepairs, applyRepair, applyTransform, composeTransforms } = require("./repair");
 const { sweep } = require("./library");
 
 const MEDIA_DIR = path.join(__dirname, "seed-media");
@@ -34,6 +34,12 @@ const videoMediaCache = new Map();
 // committed cover frames for it) and the repair endpoint (which applies
 // it as a selection, writing no files).
 const COVER_REPAIR_ID = "cover-frame-hands-up";
+
+// Repairs stack: a variant id is a chain of repair ids joined by "~",
+// in the order the creator directed them. A bare repair id is a chain of
+// one — every variant id issued before chains existed stays valid.
+const CHAIN_SEP = "~";
+const chainOf = (variantId) => (variantId ? variantId.split(CHAIN_SEP) : []);
 
 // Resolves a take's media: the original seeded image, or a repaired
 // variant of it (variants live under seed-media/repaired and are produced
@@ -118,11 +124,12 @@ async function resolveVideoMedia(take, variantId) {
   return media;
 }
 
-// The repair context for a video take: its kind, and the cover-frame
+// The repair context for a video take: its kind, the chain of repairs
+// already directed (so none is offered twice), and the cover-frame
 // moment when the take has a hands-up window AND the committed cover
 // frames exist to choose.
-function videoRepairContext(take, sidecar) {
-  const context = { kind: "video" };
+function videoRepairContext(take, sidecar, variantId) {
+  const context = { kind: "video", chain: chainOf(variantId) };
   if (
     sidecar &&
     Array.isArray(sidecar.handsUpSeconds) &&
@@ -306,10 +313,15 @@ const server = http.createServer((req, res) => {
     const take = TAKES.find((t) => t.id === repairsMatch[1]);
     if (!take) return sendJson(res, 404, { error: "Unknown take id." });
     (async () => {
-      const media = take.kind === "video" ? await resolveVideoMedia(take) : resolveMedia(take);
+      const variantId = url.searchParams.get("variant") || undefined;
+      const media =
+        take.kind === "video" ? await resolveVideoMedia(take, variantId) : resolveMedia(take, variantId);
       if (!media || !media.groundTruth) return sendJson(res, 200, { repairs: [] });
-      const m = await measureTake(take);
-      const context = take.kind === "video" ? videoRepairContext(take, media.sidecar) : undefined;
+      const m = await measureTake(take, variantId);
+      const context =
+        take.kind === "video"
+          ? videoRepairContext(take, media.sidecar, variantId)
+          : { chain: chainOf(variantId) };
       sendJson(res, 200, { repairs: availableRepairs(m, media.groundTruth, context) });
     })().catch((err) => sendJson(res, 500, { error: `Repairs failed: ${err.message}` }));
     return;
@@ -329,24 +341,73 @@ const server = http.createServer((req, res) => {
         } catch {
           return sendJson(res, 400, { error: "Request body must be JSON." });
         }
-        const media = take.kind === "video" ? await resolveVideoMedia(take) : resolveMedia(take);
+        // Repairs stack: the repair applies to the variant the creator
+        // is currently looking at (input.baseVariant), or to the
+        // original when no base is named. The result's variant id is
+        // the chain, in the order the repairs were directed.
+        const baseVariant =
+          typeof input.baseVariant === "string" && input.baseVariant ? input.baseVariant : undefined;
+        const media =
+          take.kind === "video"
+            ? await resolveVideoMedia(take, baseVariant)
+            : resolveMedia(take, baseVariant);
         if (!media || !media.groundTruth) {
           return sendJson(res, 400, { error: "This take has no media to repair." });
         }
-        const m = await measureTake(take);
-        const context = take.kind === "video" ? videoRepairContext(take, media.sidecar) : undefined;
+        const m = await measureTake(take, baseVariant);
+        const context =
+          take.kind === "video"
+            ? videoRepairContext(take, media.sidecar, baseVariant)
+            : { chain: chainOf(baseVariant) };
         const offeredList = availableRepairs(m, media.groundTruth, context);
         const offered = offeredList.map((r) => r.id);
         if (!offered.includes(input.repairId)) {
           return sendJson(res, 400, { error: `Repair ${input.repairId} is not offered for this take's current verdicts.` });
         }
+        const resultVariantId = baseVariant ? `${baseVariant}${CHAIN_SEP}${input.repairId}` : input.repairId;
         let changes;
-        if (take.kind === "video" && input.repairId === COVER_REPAIR_ID) {
-          // A cover-frame choice selects which committed frame
-          // represents the post; no file is written and no pixel is
-          // edited. The variant resolves to the hands-up frames.
+        if (take.kind === "video" && input.repairId === COVER_REPAIR_ID && !baseVariant) {
+          // A cover-frame choice on the original selects which
+          // committed frame represents the post; no file is written
+          // and no pixel is edited. The variant resolves to the
+          // hands-up frames.
           changes = [
             `Cover frame: the post will now open on the moment at ${Math.round(context.coverFrameAtSeconds)} seconds, inside the ${media.sidecar.handsUpSeconds[0]} to ${media.sidecar.handsUpSeconds[1]} second window where your hands are up signing.`,
+            "The video itself is unchanged — nothing was redrawn, moved, or cut; only the frame chosen to represent the post has moved.",
+          ];
+        } else if (take.kind === "video" && input.repairId === COVER_REPAIR_ID) {
+          // A cover-frame choice stacked on a reframed variant: the
+          // reframe is one transform applied to the whole take, so the
+          // hands-up moment is brought into the chain's exact geometry
+          // by replaying the chain's composed transform on the cover
+          // frame. The result is a real variant with its own files.
+          const transform = media.sidecar && media.sidecar.reframeTransform;
+          if (!transform) {
+            return sendJson(res, 400, { error: "This chain has no reframe to carry the cover frame into; the cover choice cannot stack here." });
+          }
+          const origSidecar = JSON.parse(fs.readFileSync(path.join(MEDIA_DIR, `${take.id}.json`), "utf8"));
+          const coverFrame = fs.readFileSync(path.join(MEDIA_DIR, `${take.id}-cover-frame.png`));
+          const out = await applyTransform(
+            coverFrame,
+            { subject: origSidecar.subject, sign: origSidecar.banner, privateItem: origSidecar.privateItem },
+            transform
+          );
+          fs.mkdirSync(REPAIRED_DIR, { recursive: true });
+          fs.writeFileSync(path.join(REPAIRED_DIR, `${take.id}--${resultVariantId}.png`), out.buffer);
+          const variantSidecar = {
+            ...media.sidecar,
+            subject: out.groundTruth.subject,
+            banner: out.groundTruth.sign,
+            contentBox: out.contentBox,
+            reframeTransform: transform,
+          };
+          fs.writeFileSync(
+            path.join(REPAIRED_DIR, `${take.id}--${resultVariantId}.json`),
+            JSON.stringify(variantSidecar, null, 2)
+          );
+          changes = [
+            `Cover frame: the post will now open on the moment at ${Math.round(context.coverFrameAtSeconds)} seconds, inside the ${media.sidecar.handsUpSeconds[0]} to ${media.sidecar.handsUpSeconds[1]} second window where your hands are up signing.`,
+            "The moment was brought into the reframed picture you already approved — the same pull-back, applied to that frame — so the whole banner and both hands are inside the post.",
             "The video itself is unchanged — nothing was redrawn, moved, or cut; only the frame chosen to represent the post has moved.",
           ];
         } else {
@@ -357,37 +418,51 @@ const server = http.createServer((req, res) => {
             m
           );
           fs.mkdirSync(REPAIRED_DIR, { recursive: true });
-          fs.writeFileSync(path.join(REPAIRED_DIR, `${take.id}--${input.repairId}.png`), out.buffer);
+          fs.writeFileSync(path.join(REPAIRED_DIR, `${take.id}--${resultVariantId}.png`), out.buffer);
           // A repaired video variant's sidecar keeps the video shape:
           // the repair's transformed boxes under their own names. A
           // reframe also declares the box its picture occupies, so the
-          // re-check measures the picture, not the repair's own border.
+          // re-check measures the picture, not the repair's own border,
+          // and records the chain's composed reframe transform, so a
+          // later cover-frame choice can be replayed into the same
+          // geometry. A repair that moves no pixels (exposure) carries
+          // the base's box and transform forward unchanged.
+          const baseTransform =
+            take.kind === "video" ? media.sidecar && media.sidecar.reframeTransform : media.groundTruth.reframeTransform;
+          const chainTransform = out.transform
+            ? composeTransforms(baseTransform || null, out.transform)
+            : baseTransform;
+          const chainContentBox =
+            out.contentBox ||
+            (take.kind === "video" ? media.sidecar && media.sidecar.contentBox : media.groundTruth.contentBox);
           const variantSidecar =
             take.kind === "video"
               ? {
                   ...media.sidecar,
                   subject: out.groundTruth.subject,
                   banner: out.groundTruth.sign,
-                  ...(out.contentBox ? { contentBox: out.contentBox } : {}),
+                  ...(chainContentBox ? { contentBox: chainContentBox } : {}),
+                  ...(chainTransform ? { reframeTransform: chainTransform } : {}),
                 }
               : {
                   ...out.groundTruth,
-                  ...(out.contentBox ? { contentBox: out.contentBox } : {}),
+                  ...(chainContentBox ? { contentBox: chainContentBox } : {}),
+                  ...(chainTransform ? { reframeTransform: chainTransform } : {}),
                 };
           fs.writeFileSync(
-            path.join(REPAIRED_DIR, `${take.id}--${input.repairId}.json`),
+            path.join(REPAIRED_DIR, `${take.id}--${resultVariantId}.json`),
             JSON.stringify(variantSidecar, null, 2)
           );
           changes = out.changes;
         }
-        measurementCache.delete(`${take.id}|${input.repairId}`);
-        semanticCache.delete(`${take.id}|${input.repairId}`);
-        videoMediaCache.delete(`${take.id}|${input.repairId}`);
-        const result = await buildChecks(take, input.repairId);
-        const original = await buildChecks(take);
+        measurementCache.delete(`${take.id}|${resultVariantId}`);
+        semanticCache.delete(`${take.id}|${resultVariantId}`);
+        videoMediaCache.delete(`${take.id}|${resultVariantId}`);
+        const result = await buildChecks(take, resultVariantId);
+        const before = await buildChecks(take, baseVariant);
         const targetId = (offeredList.find((r) => r.id === input.repairId) || {}).fixesCheck;
         const rank = { fix: 0, uncertain: 1, pass: 2 };
-        const beforeCheck = original.checks.find((c) => c.id === targetId);
+        const beforeCheck = before.checks.find((c) => c.id === targetId);
         const afterCheck = result.checks.find((c) => c.id === targetId);
         const outcome =
           beforeCheck && afterCheck
@@ -400,7 +475,7 @@ const server = http.createServer((req, res) => {
                 worse: rank[afterCheck.verdict] < rank[beforeCheck.verdict],
               }
             : null;
-        sendJson(res, 200, { variantId: input.repairId, changes, outcome, result });
+        sendJson(res, 200, { variantId: resultVariantId, changes, outcome, result });
       })().catch((err) => sendJson(res, 500, { error: `Repair failed: ${err.message}` }));
     });
     return;
