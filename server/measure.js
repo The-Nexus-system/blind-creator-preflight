@@ -135,7 +135,13 @@ async function measureImage(buffer, groundTruth) {
         ["sign", groundTruth.sign],
       ]) {
         if (box && !boxInside(box, crop.window)) {
-          failures.push(`the ${label} is cut by the ${crop.name} crop`);
+          // A take may name its protected element (a banner, for ST-V2);
+          // the verdict reports the element by the take's own name.
+          const named =
+            label === "sign" && groundTruth.labels && groundTruth.labels.sign
+              ? groundTruth.labels.sign
+              : label;
+          failures.push(`the ${named} is cut by the ${crop.name} crop`);
         }
       }
     }
@@ -143,7 +149,9 @@ async function measureImage(buffer, groundTruth) {
       verdict: failures.length ? "fix" : "pass",
       detail: failures.length
         ? `In the post as it will be shown, ${failures.join("; ")}.`
-        : "The subject and any sign survive both platform crops whole.",
+        : groundTruth.labels && groundTruth.labels.sign
+          ? `The subject and the ${groundTruth.labels.sign} survive both platform crops whole.`
+          : "The subject and any sign survive both platform crops whole.",
     };
   }
 
@@ -163,4 +171,61 @@ async function measureImage(buffer, groundTruth) {
   return result;
 }
 
-module.exports = { measureImage, CROPS, centreCropWindow };
+// Measures a seeded VIDEO take from its committed frames (extracted at
+// seed-build time by tools/extract-seed-frames.js — the running server
+// never decodes video). Two frames, two questions:
+// - the RECORDED frame, against the platform crops: crop safety and
+//   quality are properties of what was recorded, measured exactly as a
+//   photo's are, with the take's banner in the sign's protective slot;
+// - the POSTED frame (the recorded frame through the post's centre crop):
+//   framing is judged there, because that is the frame the audience sees
+//   and the frame the creator is "in" once the post exists. The design
+//   record pins ST-V2's framing verdict in exactly those terms: in the
+//   posted crop the creator sits off-centre, pushed to the edge.
+// The composition returns the same shape measureImage returns, so the
+// checks and repairs consume both without knowing which produced them.
+async function measureVideoFrames(frameBuffer, postedBuffer, sidecar) {
+  const recordedGT = {
+    subject: sidecar.subject,
+    sign: sidecar.banner,
+    labels: { sign: "banner" },
+  };
+  const win = sidecar.postedCropWindow;
+  const toPosted = (box) =>
+    box
+      ? { x0: box.x0 - win.x0, y0: box.y0 - win.y0, x1: box.x1 - win.x0, y1: box.y1 - win.y0 }
+      : box;
+  const postedGT = {
+    subject: toPosted(sidecar.subject),
+    sign: toPosted(sidecar.banner),
+    labels: { sign: "banner" },
+  };
+
+  const recorded = await measureImage(frameBuffer, recordedGT);
+  const posted = await measureImage(postedBuffer, postedGT);
+
+  let framing = null;
+  if (posted.framing) {
+    const edges = posted.framing.subjectTouchesEdges;
+    framing = {
+      subjectTouchesEdges: edges,
+      verdict: posted.framing.verdict,
+      detail: edges.length
+        ? `In the post as it will be shown, the subject reaches the ${edges.join(" and ")} edge of the frame.`
+        : "In the post as it will be shown, the subject sits inside the frame with margin on every side.",
+    };
+  }
+
+  return {
+    width: recorded.width,
+    height: recorded.height,
+    meanBrightness: recorded.meanBrightness,
+    sharpness: recorded.sharpness,
+    crops: recorded.crops,
+    framing,
+    cropSafety: recorded.cropSafety,
+    quality: recorded.quality,
+  };
+}
+
+module.exports = { measureImage, measureVideoFrames, CROPS, centreCropWindow };

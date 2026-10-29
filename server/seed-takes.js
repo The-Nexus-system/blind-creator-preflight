@@ -6,7 +6,10 @@
 // by the Nexus System on Oct 16, 2026). Each take is a specification of a
 // photo or short video with a known, designed state — clean, or carrying
 // one named flaw. The photo takes have generated media (server/seed-media/)
-// so the deterministic pipeline measures real pixels; the video takes are
+// so the deterministic pipeline measures real pixels. Of the video takes,
+// ST-V2 has media: the seeded video file plus the still frames extracted
+// from it at seed-build time, which are what its checks measure and judge
+// (the running server never decodes video). ST-V1 and ST-V3 remain
 // specifications until their media is made.
 //
 // This file carries NO verdicts. Verdicts come only from the pipelines:

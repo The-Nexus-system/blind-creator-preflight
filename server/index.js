@@ -17,7 +17,8 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { TAKES, CHECKS } = require("./seed-takes");
-const { measureImage } = require("./measure");
+const { measureImage, measureVideoFrames } = require("./measure");
+const { Jimp } = require("jimp");
 const { runSemanticChecks } = require("./semantic");
 const { buildProofCopy, draftAltText, readiness, buildPublicDescription } = require("./copy");
 const { availableRepairs, applyRepair } = require("./repair");
@@ -27,6 +28,12 @@ const MEDIA_DIR = path.join(__dirname, "seed-media");
 const REPAIRED_DIR = path.join(MEDIA_DIR, "repaired");
 const measurementCache = new Map();
 const semanticCache = new Map();
+const videoMediaCache = new Map();
+
+// The cover-frame repair's id, shared by the resolver (which serves the
+// committed cover frames for it) and the repair endpoint (which applies
+// it as a selection, writing no files).
+const COVER_REPAIR_ID = "cover-frame-hands-up";
 
 // Resolves a take's media: the original seeded image, or a repaired
 // variant of it (variants live under seed-media/repaired and are produced
@@ -46,12 +53,102 @@ function resolveMedia(take, variantId) {
   };
 }
 
+// Resolves a VIDEO take's media. The running server never decodes
+// video (the deployed image has no ffmpeg): the frames the checks judge
+// were extracted from the seeded video at seed-build time and committed
+// beside it (tools/extract-seed-frames.js). A video media carries the
+// recorded frame, the posted frame (the recorded frame through the
+// post's 9:16 centre crop), and the take's sidecar; repairs produce new
+// recorded frames under seed-media/repaired, whose posted frames are
+// derived by the same crop the platform applies. The cover-frame
+// variant resolves to the committed hands-up frames — choosing a cover
+// frame selects media, it does not edit any.
+async function resolveVideoMedia(take, variantId) {
+  const cacheKey = `${take.id}|${variantId || ""}`;
+  if (videoMediaCache.has(cacheKey)) return videoMediaCache.get(cacheKey);
+  let framePath;
+  let sidecarPath;
+  let postedPath = null;
+  if (variantId === COVER_REPAIR_ID) {
+    framePath = path.join(MEDIA_DIR, `${take.id}-cover-frame.png`);
+    postedPath = path.join(MEDIA_DIR, `${take.id}-cover-posted.png`);
+    sidecarPath = path.join(MEDIA_DIR, `${take.id}.json`);
+  } else if (variantId) {
+    framePath = path.join(REPAIRED_DIR, `${take.id}--${variantId}.png`);
+    sidecarPath = path.join(REPAIRED_DIR, `${take.id}--${variantId}.json`);
+  } else {
+    framePath = path.join(MEDIA_DIR, `${take.id}-frame.png`);
+    postedPath = path.join(MEDIA_DIR, `${take.id}-posted.png`);
+    sidecarPath = path.join(MEDIA_DIR, `${take.id}.json`);
+  }
+  let media = null;
+  if (fs.existsSync(framePath) && fs.existsSync(sidecarPath)) {
+    const sidecar = JSON.parse(fs.readFileSync(sidecarPath, "utf8"));
+    if (sidecar && sidecar.postedCropWindow && sidecar.subject && sidecar.banner) {
+      const frameBuffer = fs.readFileSync(framePath);
+      let postedBuffer;
+      if (postedPath && fs.existsSync(postedPath)) {
+        postedBuffer = fs.readFileSync(postedPath);
+      } else {
+        const img = await Jimp.fromBuffer(frameBuffer);
+        const win = sidecar.postedCropWindow;
+        img.crop({
+          x: Math.round(win.x0),
+          y: Math.round(win.y0),
+          w: Math.round(win.x1 - win.x0),
+          h: Math.round(win.y1 - win.y0),
+        });
+        postedBuffer = await img.getBuffer("image/png");
+      }
+      media = {
+        frameBuffer,
+        postedBuffer,
+        sidecar,
+        // The measurement ground truth: the take's banner stands in the
+        // protective slot measure.js calls the sign, under its own name.
+        groundTruth: {
+          subject: sidecar.subject,
+          sign: sidecar.banner,
+          labels: { sign: "banner" },
+        },
+      };
+    }
+  }
+  videoMediaCache.set(cacheKey, media);
+  return media;
+}
+
+// The repair context for a video take: its kind, and the cover-frame
+// moment when the take has a hands-up window AND the committed cover
+// frames exist to choose.
+function videoRepairContext(take, sidecar) {
+  const context = { kind: "video" };
+  if (
+    sidecar &&
+    Array.isArray(sidecar.handsUpSeconds) &&
+    fs.existsSync(path.join(MEDIA_DIR, `${take.id}-cover-frame.png`))
+  ) {
+    context.coverFrameAtSeconds =
+      (sidecar.handsUpSeconds[0] + sidecar.handsUpSeconds[1]) / 2;
+  }
+  return context;
+}
+
 async function measureTake(take, variantId) {
   const key = `${take.id}|${variantId || ""}`;
   if (!measurementCache.has(key)) {
-    const media = resolveMedia(take, variantId);
-    if (!media || !media.groundTruth) return null;
-    measurementCache.set(key, await measureImage(media.buffer, media.groundTruth));
+    if (take.kind === "video") {
+      const vm = await resolveVideoMedia(take, variantId);
+      if (!vm) return null;
+      measurementCache.set(
+        key,
+        await measureVideoFrames(vm.frameBuffer, vm.postedBuffer, vm.sidecar)
+      );
+    } else {
+      const media = resolveMedia(take, variantId);
+      if (!media || !media.groundTruth) return null;
+      measurementCache.set(key, await measureImage(media.buffer, media.groundTruth));
+    }
   }
   return measurementCache.get(key);
 }
@@ -72,8 +169,9 @@ async function buildChecks(take, variantId) {
   let privacyWarning = null;
   let privacyWarningSource = null;
 
-  const media = resolveMedia(take, variantId);
-  const hasMedia = Boolean(media);
+  const media = take.kind === "video" ? null : resolveMedia(take, variantId);
+  const videoMedia = take.kind === "video" ? await resolveVideoMedia(take, variantId) : null;
+  const hasMedia = Boolean(media || videoMedia);
 
   if (hasMedia) {
     const m = await measureTake(take, variantId);
@@ -83,9 +181,16 @@ async function buildChecks(take, variantId) {
       Object.assign(byId.quality, { verdict: m.quality.verdict, detail: m.quality.detail, source: "measured" });
     }
 
+    // The semantic pipeline judges the frame the audience will see:
+    // for a photo that is the photo; for a video it is the posted frame
+    // — the crop is where a banner's word is lost, so the posted frame
+    // is what text and first impression must be judged on.
     const semKey = `${take.id}|${variantId || ""}`;
     if (!semanticCache.has(semKey)) {
-      semanticCache.set(semKey, await runSemanticChecks(media.buffer, take.intent));
+      semanticCache.set(
+        semKey,
+        await runSemanticChecks(videoMedia ? videoMedia.postedBuffer : media.buffer, take.intent)
+      );
     }
     const sem = semanticCache.get(semKey);
     Object.assign(byId.text, { verdict: sem.text.verdict, detail: sem.text.detail, source: sem.source });
@@ -97,11 +202,21 @@ async function buildChecks(take, variantId) {
     privacyWarning = sem.privacyWarning;
     privacyWarningSource = sem.privacyWarningSource;
 
-    Object.assign(byId.audio, {
-      verdict: "uncertain",
-      detail: "Still photo: there is no audio track to check.",
-      source: "determined",
-    });
+    if (videoMedia) {
+      Object.assign(byId.audio, {
+        verdict: "uncertain",
+        detail: videoMedia.sidecar.silent
+          ? "This video has no audio track: it is silent, so there is no speech to check — and silence the creator chose is not a defect."
+          : "This video's audio track has not been transcribed or checked yet in this build, so the check cannot settle.",
+        source: "determined",
+      });
+    } else {
+      Object.assign(byId.audio, {
+        verdict: "uncertain",
+        detail: "Still photo: there is no audio track to check.",
+        source: "determined",
+      });
+    }
   } else {
     const noMedia = `This seeded ${take.kind} has no media file yet, so there is nothing to measure or judge.`;
     for (const id of ["framing", "crop", "quality", "text", "firstImpression", "audio"]) {
@@ -188,10 +303,11 @@ const server = http.createServer((req, res) => {
     const take = TAKES.find((t) => t.id === repairsMatch[1]);
     if (!take) return sendJson(res, 404, { error: "Unknown take id." });
     (async () => {
-      const media = resolveMedia(take);
+      const media = take.kind === "video" ? await resolveVideoMedia(take) : resolveMedia(take);
       if (!media || !media.groundTruth) return sendJson(res, 200, { repairs: [] });
       const m = await measureTake(take);
-      sendJson(res, 200, { repairs: availableRepairs(m, media.groundTruth) });
+      const context = take.kind === "video" ? videoRepairContext(take, media.sidecar) : undefined;
+      sendJson(res, 200, { repairs: availableRepairs(m, media.groundTruth, context) });
     })().catch((err) => sendJson(res, 500, { error: `Repairs failed: ${err.message}` }));
     return;
   }
@@ -210,27 +326,53 @@ const server = http.createServer((req, res) => {
         } catch {
           return sendJson(res, 400, { error: "Request body must be JSON." });
         }
-        const media = resolveMedia(take);
+        const media = take.kind === "video" ? await resolveVideoMedia(take) : resolveMedia(take);
         if (!media || !media.groundTruth) {
           return sendJson(res, 400, { error: "This take has no media to repair." });
         }
         const m = await measureTake(take);
-        const offered = availableRepairs(m, media.groundTruth).map((r) => r.id);
+        const context = take.kind === "video" ? videoRepairContext(take, media.sidecar) : undefined;
+        const offeredList = availableRepairs(m, media.groundTruth, context);
+        const offered = offeredList.map((r) => r.id);
         if (!offered.includes(input.repairId)) {
           return sendJson(res, 400, { error: `Repair ${input.repairId} is not offered for this take's current verdicts.` });
         }
-        const out = await applyRepair(media.buffer, media.groundTruth, input.repairId, m);
-        fs.mkdirSync(REPAIRED_DIR, { recursive: true });
-        fs.writeFileSync(path.join(REPAIRED_DIR, `${take.id}--${input.repairId}.png`), out.buffer);
-        fs.writeFileSync(
-          path.join(REPAIRED_DIR, `${take.id}--${input.repairId}.json`),
-          JSON.stringify(out.groundTruth, null, 2)
-        );
+        let changes;
+        if (take.kind === "video" && input.repairId === COVER_REPAIR_ID) {
+          // A cover-frame choice selects which committed frame
+          // represents the post; no file is written and no pixel is
+          // edited. The variant resolves to the hands-up frames.
+          changes = [
+            `Cover frame: the post will now open on the moment at ${Math.round(context.coverFrameAtSeconds)} seconds, inside the ${media.sidecar.handsUpSeconds[0]} to ${media.sidecar.handsUpSeconds[1]} second window where your hands are up signing.`,
+            "The video itself is unchanged — nothing was redrawn, moved, or cut; only the frame chosen to represent the post has moved.",
+          ];
+        } else {
+          const out = await applyRepair(
+            take.kind === "video" ? media.frameBuffer : media.buffer,
+            media.groundTruth,
+            input.repairId,
+            m
+          );
+          fs.mkdirSync(REPAIRED_DIR, { recursive: true });
+          fs.writeFileSync(path.join(REPAIRED_DIR, `${take.id}--${input.repairId}.png`), out.buffer);
+          // A repaired video variant's sidecar keeps the video shape:
+          // the repair's transformed boxes under their own names.
+          const variantSidecar =
+            take.kind === "video"
+              ? { ...media.sidecar, subject: out.groundTruth.subject, banner: out.groundTruth.sign }
+              : out.groundTruth;
+          fs.writeFileSync(
+            path.join(REPAIRED_DIR, `${take.id}--${input.repairId}.json`),
+            JSON.stringify(variantSidecar, null, 2)
+          );
+          changes = out.changes;
+        }
         measurementCache.delete(`${take.id}|${input.repairId}`);
         semanticCache.delete(`${take.id}|${input.repairId}`);
+        videoMediaCache.delete(`${take.id}|${input.repairId}`);
         const result = await buildChecks(take, input.repairId);
         const original = await buildChecks(take);
-        const targetId = (availableRepairs(m, media.groundTruth).find((r) => r.id === input.repairId) || {}).fixesCheck;
+        const targetId = (offeredList.find((r) => r.id === input.repairId) || {}).fixesCheck;
         const rank = { fix: 0, uncertain: 1, pass: 2 };
         const beforeCheck = original.checks.find((c) => c.id === targetId);
         const afterCheck = result.checks.find((c) => c.id === targetId);
@@ -245,7 +387,7 @@ const server = http.createServer((req, res) => {
                 worse: rank[afterCheck.verdict] < rank[beforeCheck.verdict],
               }
             : null;
-        sendJson(res, 200, { variantId: input.repairId, changes: out.changes, outcome, result });
+        sendJson(res, 200, { variantId: input.repairId, changes, outcome, result });
       })().catch((err) => sendJson(res, 500, { error: `Repair failed: ${err.message}` }));
     });
     return;

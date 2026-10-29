@@ -81,10 +81,20 @@ async function reframe(buffer, groundTruth, factor, tx, ty, dx, dy) {
   return { buffer: await canvas.getBuffer("image/png"), groundTruth: gt };
 }
 
-// Which repairs apply, given a measurement of the original take.
-function availableRepairs(measurement, groundTruth) {
+// Which repairs apply, given a measurement of the original take. The
+// optional context carries what the measurement cannot say: the take's
+// kind, and for a video with a hands-up window, the moment a cover-frame
+// choice would land on (the repairs endpoint derives both from the take
+// and its sidecar).
+function availableRepairs(measurement, groundTruth, context) {
   const repairs = [];
-  if (measurement.framing && measurement.framing.verdict === "fix") {
+  const isVideo = Boolean(context && context.kind === "video");
+  if (measurement.framing && measurement.framing.verdict === "fix" && !isVideo) {
+    // Not offered for a video: a Reel's framing is judged in the posted
+    // frame, and a 12 percent pull-back of the wide recording cannot
+    // centre the subject inside the vertical post — the fit-crops
+    // reframe below is the repair that does that, so it is the one
+    // offered.
     repairs.push({
       id: "reframe-margin",
       name: "Reframe: pull back so the subject has margin on every side",
@@ -92,9 +102,10 @@ function availableRepairs(measurement, groundTruth) {
     });
   }
   if (measurement.cropSafety && measurement.cropSafety.verdict === "fix") {
+    const signName = (groundTruth.labels && groundTruth.labels.sign) || "sign";
     repairs.push({
       id: "reframe-fit-crops",
-      name: "Reframe: pull back until the subject and sign fit inside every platform crop",
+      name: `Reframe: pull back until the subject and ${signName} fit inside every platform crop`,
       fixesCheck: "crop",
     });
   }
@@ -107,6 +118,16 @@ function availableRepairs(measurement, groundTruth) {
       id: "brightness-auto",
       name: "Exposure: fix it automatically — Pre-Flight measures, adjusts, and measures again",
       fixesCheck: "quality",
+    });
+  }
+  if (context && typeof context.coverFrameAtSeconds === "number") {
+    // A cover-frame choice is a selection, not a pixel edit: it is
+    // offered whenever the take has a hands-up window to choose from,
+    // and applying it produces the variant that opens on that moment.
+    repairs.push({
+      id: "cover-frame-hands-up",
+      name: `Cover frame: use the moment at ${Math.round(context.coverFrameAtSeconds)} seconds, where your hands are up signing`,
+      fixesCheck: "firstImpression",
     });
   }
   return repairs;
@@ -142,9 +163,10 @@ async function applyRepair(buffer, groundTruth, repairId, measurement) {
     const acx = (area.x0 + area.x1) / 2;
     const acy = (area.y0 + area.y1) / 2;
     const out = await reframe(buffer, groundTruth, factor, ucx, ucy, acx, acy);
+    const signName = (groundTruth.labels && groundTruth.labels.sign) || "sign";
     out.changes = [
       `Pulled the frame back to ${Math.round(factor * 100)} percent and centred everything that matters inside the safe area the platform crops share.`,
-      `Before, the subject and sign together spanned ${Math.round((uw / width) * 100)} percent of the frame's width; the safe area allows ${Math.round(((area.x1 - area.x0) / width) * 100)} percent.`,
+      `Before, the subject and ${signName} together spanned ${Math.round((uw / width) * 100)} percent of the frame's width; the safe area allows ${Math.round(((area.x1 - area.x0) / width) * 100)} percent.`,
       "The border is filled from the take's own edge colour; no content was invented.",
     ];
     return out;
