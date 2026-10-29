@@ -91,4 +91,35 @@ function readiness(result, { warningAcknowledged, altTextApproved }) {
   return { ready: reasons.length === 0, reasons };
 }
 
-module.exports = { buildProofCopy, draftAltText, readiness };
+function buildPublicDescription(take, result) {
+  // Tier 2: the public, audience-facing description — the proof copy's
+  // sibling, built from the same facts but written for the audience:
+  // concise, in the open, and creator-approved before it is ever used.
+  // For a video it is timestamped by segment; the seeded video takes have
+  // no media yet, so no timestamps exist to publish and the description
+  // honestly reports itself unavailable rather than inventing a timeline.
+  if (take.kind === "video") {
+    return {
+      available: false,
+      reason:
+        "This seeded video has no media file yet, so there is no visual track to describe and no timestamps to publish.",
+    };
+  }
+  const byId = Object.fromEntries(result.checks.map((c) => [c.id, c]));
+  const sentences = [take.intent.endsWith(".") ? take.intent : `${take.intent}.`];
+  if (byId.framing && byId.framing.source === "measured" && byId.framing.verdict === "pass") {
+    sentences.push("The subject is framed whole, with room on every side.");
+  }
+  if (byId.text && byId.text.source === "model" && byId.text.verdict === "pass") {
+    sentences.push(byId.text.detail);
+  }
+  return {
+    available: true,
+    text: sentences.join(" "),
+    source: "assembled",
+    note:
+      "Assembled from your intent and the facts the checks verified — nothing is described that no check saw. Edit it freely; like the alt text, it is only ever used with your approval. It is optional: a post does not need it to be ready.",
+  };
+}
+
+module.exports = { buildProofCopy, draftAltText, readiness, buildPublicDescription };
