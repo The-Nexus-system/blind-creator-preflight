@@ -79,15 +79,25 @@ Under Spark's estimates, the designed catches reproduced: ST-P2's framing fix
 (sign estimate {249, 600, 1000, 729} cut by both platform crops), and every
 designed verdict on ST-V2, whose posted-frame estimates agreed across the
 deployed and local runs. One verdict changed: ST-P8's crop went from pass to
-fix, because Spark estimates the letter at {699, 800, 951, 950} — a position
-the platform crops would cut — where the recorded facts place it inside the
-crops. The estimate reproduced across runs; it is consistently, confidently
-different from the recorded position.
+fix.
+
+The ST-P8 change was first read as estimation error. It is not, and this
+section corrects that reading (Oct 30, after the take's sidecar was read
+directly and Test 5 scored the estimates against the recorded boxes). Spark
+estimates the letter at {699, 800, 951, 950}; the recorded box for the letter
+is {700, 800, 950, 950} — the estimate is essentially exact, and the letter
+truly sits outside both centre crops (on the 1000-pixel canvas the 9:16
+window ends at x=781 and the 4:5 window at x=900). The recorded-facts pass
+came from somewhere else: ST-P8's sidecar records the letter as a private
+item and its sign slot is null, so the recorded crop check never included the
+letter in what it protected. Any estimator that finds the letter and reports
+it in the sign slot produces the fix, however accurate it is. The difference
+is a rule — whether a text or private region belongs in the crop check's
+protected set — not a model error and not a conflict between the estimate and
+the record.
 
 Ruling (the Nexus System, Oct 30): the fallback order is SAM's measurement
-first, then Muse Spark's judgement, then the recorded facts last. The ST-P8
-outcome above is the known price of that order, recorded here rather than
-tuned away.
+first, then Muse Spark's judgement, then the recorded facts last.
 
 ## Test 5 — Spark vs Muse Wonder as the estimator (Oct 30, in progress)
 
@@ -98,7 +108,32 @@ crops (matching fact) or outside (Spark's current error). A reachability probe
 from inside the Fly deployment is included, since a better estimator the
 deployment cannot reach is not a candidate.
 
-Results: pending — this section is completed when the run lands.
+Results (main arm, Oct 30): Wonder is consistently the better estimator.
+Across the five images and three samples each, Wonder returned 15 of 15
+usable replies and Spark 13 of 15 (two Spark replies on ST-P2 failed the
+strict parser and were distrusted). Wonder's boxes were pixel-exact on the
+subject and sign for ST-P2, ST-P4, and ST-P8 in every sample, with identical
+boxes across samples on those takes; Spark matched the designed catches too
+but showed a recurring overshoot of about 28 pixels (subject bottom on ST-P1
+and ST-P4, subject top on ST-P8) and more run-to-run spread. On ST-V2's
+posted frame the two were roughly tied, both reproducing the framing fix. On
+the ST-P1 control, both models widened the figure by about 28–30 pixels per
+side against the generator's spec — and SAM's independent box agrees with
+the models, so that delta is spec-versus-rendering, not model error.
+Decisive case: on ST-P8's letter, Spark was within a pixel on two of three
+samples and Wonder was exact on all three — both models place the letter
+where the record does, outside the crops (see Test 4: the flip is a rule
+difference, not an estimation error, and no model swap changes it).
+Reachability: one Muse Wonder call executed from inside the Fly deployment,
+through the app's own model code over the pinned route, returned a real
+completion — Wonder is reachable in production exactly as Spark is. Cost
+note: Wonder is the premium-priced tier, which is a product consideration
+outside this measurement; the choice of model for the judgement tier is the
+Nexus System's decision.
+
+The remaining family members — Muse Spark 1.3-contributor, 1.2,
+1.2-contributor, and 1.1 — are being run through the identical harness; this
+section is completed when that arm lands.
 
 ## What this adds up to
 
