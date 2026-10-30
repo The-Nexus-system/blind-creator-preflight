@@ -39,6 +39,14 @@ function buildProofCopy(take, result) {
     lines.push(result.privacyWarning.detail);
     lines.push(`(Warning source: ${result.privacyWarningSource}.)`);
   }
+  if (result.transcript) {
+    // The speech section, kept separate from the visual track exactly as
+    // the design's proof-copy sequence specifies: what was said, from
+    // the Muse Voice Transcribe transcript the audio check judged.
+    lines.push("");
+    lines.push("What was said (transcribed by Muse Voice Transcribe):");
+    lines.push(result.transcript);
+  }
   lines.push("");
   lines.push(
     "This proof copy is yours alone. It is not posted, attached, or shared anywhere."
@@ -54,7 +62,7 @@ function draftAltText(take, result) {
   const byId = Object.fromEntries(result.checks.map((c) => [c.id, c]));
   if (take.kind === "photo") facts.push("A photo.");
   if (take.kind === "video") facts.push("A short video.");
-  if (byId.framing && byId.framing.source === "measured" && byId.framing.verdict === "pass") {
+  if (byId.framing && ["measured", "sam"].includes(byId.framing.source) && byId.framing.verdict === "pass") {
     facts.push("The subject is framed whole, with margin on every side.");
   }
   const source = "assembled";
@@ -107,7 +115,7 @@ function buildPublicDescription(take, result) {
   }
   const byId = Object.fromEntries(result.checks.map((c) => [c.id, c]));
   const sentences = [take.intent.endsWith(".") ? take.intent : `${take.intent}.`];
-  if (byId.framing && byId.framing.source === "measured" && byId.framing.verdict === "pass") {
+  if (byId.framing && ["measured", "sam"].includes(byId.framing.source) && byId.framing.verdict === "pass") {
     sentences.push("The subject is framed whole, with room on every side.");
   }
   if (byId.text && byId.text.source === "model" && byId.text.verdict === "pass") {

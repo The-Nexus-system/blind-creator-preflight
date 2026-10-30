@@ -7,13 +7,14 @@
 // subject and any sign fit inside the frame and inside the platform crops
 // a post will actually be shown through.
 //
-// Ground truth: for a real creator upload, the subject/sign boxes will come
-// from a segmentation model (SAM 3.1, via the backend). For the seeded demo
-// takes, the boxes are the takes' designed specifications, written by the
-// seed-image generator next to each image. The geometry compared here — box
-// against frame, box against crop window — is measured the same way in both
-// cases; only the box source differs, and every verdict says which source
-// produced it.
+// Ground truth: the boxes come from SAM 3.1 (via the backend —
+// server/sam.js) when it locates the subject, and otherwise from the
+// take's recorded facts: for the seeded demo takes, the designed
+// specifications written by the seed-image generator next to each
+// image; for a repaired version, the geometry the repair computed. The
+// geometry compared here — box against frame, box against crop window —
+// is measured the same way in both cases; only the box source differs,
+// and every verdict says which source produced it.
 
 const { Jimp } = require("jimp");
 

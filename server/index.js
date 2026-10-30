@@ -7,11 +7,15 @@
 // the browser, or this repository. The key is read from the environment
 // (MODEL_API_KEY); this file never contains it.
 //
-// Current state (scaffold): the API serves the seeded takes and STUB check
-// verdicts (see seed-takes.js) so the client and the reporting shape can be
-// built and tested deterministically. The checks pipeline replaces the stubs
-// with measured verdicts from real Model API calls once the hackathon credit
-// is visible in the account's Billing page; no paid call is made before then.
+// Current state: the API serves the seeded takes and runs the real
+// check pipelines — SAM 3.1 location plus pixel measurement for
+// framing, crop safety, and quality; Muse Spark for text, first
+// impression, and the private-information warning; Muse Voice
+// Transcribe for the audio check. Live model calls are gated on the
+// funding switch (MODEL_CALLS_ENABLED in model-api.js): while it is
+// off, the model checks report "uncertain" with the reason, never a
+// guessed verdict, and the measured checks run from the takes'
+// recorded facts.
 
 const http = require("http");
 const fs = require("fs");
@@ -20,6 +24,9 @@ const { TAKES, CHECKS } = require("./seed-takes");
 const { measureImage, measureVideoFrames } = require("./measure");
 const { Jimp } = require("jimp");
 const { runSemanticChecks } = require("./semantic");
+const { locateBoxes, resolvePhotoBoxes } = require("./sam");
+const { runAudioCheck } = require("./audio");
+const { buildDescribedAudio } = require("./narrate");
 const { buildProofCopy, draftAltText, readiness, buildPublicDescription } = require("./copy");
 const { availableRepairs, applyRepair, applyTransform, composeTransforms } = require("./repair");
 const { sweep } = require("./library");
@@ -29,6 +36,10 @@ const REPAIRED_DIR = path.join(MEDIA_DIR, "repaired");
 const measurementCache = new Map();
 const semanticCache = new Map();
 const videoMediaCache = new Map();
+const photoSamCache = new Map();
+const videoSamCache = new Map();
+const audioCache = new Map();
+const describedCache = new Map();
 
 // The cover-frame repair's id, shared by the resolver (which serves the
 // committed cover frames for it) and the repair endpoint (which applies
@@ -163,12 +174,117 @@ async function measureTake(take, variantId) {
   return measurementCache.get(key);
 }
 
+// The measurement a PHOTO take's checks use. An original take's boxes
+// come from SAM 3.1 when it answers with a subject (server/sam.js holds
+// the outcome rules: SAM boxes, recorded facts on a no-match or with
+// calls off, and a reported failure otherwise); a repaired variant
+// keeps the repair's own computed geometry. On a SAM failure the
+// returned measurement carries quality only — framing and crop need
+// boxes — and samFailure names the reason, so the checks go uncertain
+// with it rather than guessing. Failures are not cached: a later
+// request retries the call.
+async function photoCheckMeasurement(take, variantId, media) {
+  if (variantId) {
+    return {
+      measurement: await measureTake(take, variantId),
+      boxesFrom: "recorded",
+      measurementNote:
+        "Framing and crop safety are measured from this repaired version's own geometry — the boxes the repair itself computed.",
+      samFailure: null,
+    };
+  }
+  if (!photoSamCache.has(take.id)) {
+    const resolved = await resolvePhotoBoxes({
+      buffer: media.buffer,
+      recorded: media.groundTruth,
+    });
+    if (resolved.kind === "failed") {
+      return {
+        measurement: await measureImage(media.buffer, null, null),
+        boxesFrom: "sam-failed",
+        measurementNote: null,
+        samFailure: resolved.reason,
+      };
+    }
+    const measurement =
+      resolved.kind === "sam"
+        ? await measureImage(media.buffer, resolved.groundTruth, null)
+        : await measureTake(take, null);
+    photoSamCache.set(take.id, {
+      measurement,
+      boxesFrom: resolved.kind === "sam" ? "sam" : "recorded",
+      measurementNote:
+        resolved.kind === "sam"
+          ? "Framing and crop safety are measured from boxes located by SAM 3.1."
+          : resolved.samAnswered
+            ? "SAM 3.1 was asked for the subject and the sign and returned no match in this take, so framing and crop safety are measured from the take's recorded facts."
+            : null,
+      samFailure: null,
+    });
+  }
+  return photoSamCache.get(take.id);
+}
+
+// SAM on a VIDEO take's posted frame. The posted frame is the frame the
+// audience sees, so a subject box SAM locates there can source the
+// framing measurement; crop safety and quality stay with the take's
+// recorded facts. Every other outcome — calls off, a failed call, or
+// SAM returning no match (its answer for ST-V2's drawn frames, verified
+// Oct 29, 2026) — leaves the recorded facts standing and changes no
+// verdict. Returns { framing } when SAM sourced it, { answeredNoMatch:
+// true } when SAM answered with no match, or null otherwise.
+async function videoSamFraming(take, variantId, videoMedia) {
+  const key = `${take.id}|${variantId || ""}`;
+  if (!videoSamCache.has(key)) {
+    let located = null;
+    try {
+      located = await locateBoxes(videoMedia.postedBuffer);
+    } catch {
+      located = null; // a failed call: the recorded facts stand
+    }
+    if (!located || located.status !== "ok") {
+      videoSamCache.set(key, null);
+    } else if (!located.subject) {
+      videoSamCache.set(key, { answeredNoMatch: true });
+    } else {
+      const win = videoMedia.sidecar.postedCropWindow;
+      const b = videoMedia.sidecar.banner;
+      const postedSign = b
+        ? { x0: b.x0 - win.x0, y0: b.y0 - win.y0, x1: b.x1 - win.x0, y1: b.y1 - win.y0 }
+        : null;
+      const pm = await measureImage(videoMedia.postedBuffer, {
+        subject: located.subject,
+        sign: postedSign,
+      });
+      videoSamCache.set(
+        key,
+        pm.framing
+          ? {
+              framing: {
+                subjectTouchesEdges: pm.framing.subjectTouchesEdges,
+                verdict: pm.framing.verdict,
+                detail: pm.framing.subjectTouchesEdges.length
+                  ? `In the post as it will be shown, the subject reaches the ${pm.framing.subjectTouchesEdges.join(" and ")} edge of the frame.`
+                  : "In the post as it will be shown, the subject sits inside the frame with margin on every side.",
+              },
+            }
+          : null
+      );
+    }
+  }
+  return videoSamCache.get(key);
+}
+
 // Builds a take's check list from the real pipelines. Every check carries
 // its source, and no source is a stand-in verdict:
-// - "measured": computed from the take's pixels by measure.js;
-// - "model": judged by the semantic pipeline (Muse Spark);
-// - "determined": settled by the take itself (a still photo has no audio);
-// - "model-off" / "model-error" / "model-unreadable": the semantic check
+// - "measured": computed from the take's pixels by measure.js, using the
+//   take's recorded facts (or a repair's computed geometry);
+// - "sam": framing/crop measured from boxes located by SAM 3.1;
+// - "model": judged by the semantic pipeline (Muse Spark) or, for the
+//   audio check, from a Muse Voice Transcribe transcript;
+// - "determined": settled by the take itself (a still photo has no audio;
+//   a silent video has nothing to transcribe);
+// - "model-off" / "model-error" / "model-unreadable": a model check
 //   honestly reporting "uncertain" with its reason — the design has always
 //   allowed uncertain, and a failed or unfunded call never becomes a guess.
 async function buildChecks(take, variantId) {
@@ -178,19 +294,76 @@ async function buildChecks(take, variantId) {
   }
   let privacyWarning = null;
   let privacyWarningSource = null;
+  let transcript = null;
+  let measurementSource = null;
+  let measurementNote = null;
 
   const media = take.kind === "video" ? null : resolveMedia(take, variantId);
   const videoMedia = take.kind === "video" ? await resolveVideoMedia(take, variantId) : null;
   const hasMedia = Boolean(media || videoMedia);
 
-  if (hasMedia) {
+  if (hasMedia && videoMedia) {
     const m = await measureTake(take, variantId);
+    measurementSource = "recorded";
     if (m) {
-      if (m.framing) Object.assign(byId.framing, { verdict: m.framing.verdict, detail: m.framing.detail, source: "measured" });
-      if (m.cropSafety) Object.assign(byId.crop, { verdict: m.cropSafety.verdict, detail: m.cropSafety.detail, source: "measured" });
+      let framing = m.framing;
+      let framingSource = "measured";
+      const sam = await videoSamFraming(take, variantId, videoMedia);
+      if (sam && sam.framing) {
+        framing = sam.framing;
+        framingSource = "sam";
+        measurementSource = "sam";
+        measurementNote =
+          "Framing is measured from a subject box SAM 3.1 located on the posted frame; crop safety and quality are measured from the take's recorded facts.";
+      } else if (sam && sam.answeredNoMatch) {
+        measurementNote =
+          "SAM 3.1 was asked about the posted frame and returned no match, so framing, crop safety, and quality are measured from the take's recorded facts.";
+      }
+      if (framing) {
+        Object.assign(byId.framing, { verdict: framing.verdict, detail: framing.detail, source: framingSource });
+      }
+      if (m.cropSafety) {
+        Object.assign(byId.crop, { verdict: m.cropSafety.verdict, detail: m.cropSafety.detail, source: "measured" });
+      }
       Object.assign(byId.quality, { verdict: m.quality.verdict, detail: m.quality.detail, source: "measured" });
     }
 
+    const audioKey = `${take.id}|${variantId || ""}`;
+    if (!audioCache.has(audioKey)) {
+      audioCache.set(audioKey, await runAudioCheck({ sidecar: videoMedia.sidecar }));
+    }
+    const audio = audioCache.get(audioKey);
+    Object.assign(byId.audio, { verdict: audio.verdict, detail: audio.detail, source: audio.source });
+    transcript = audio.transcript;
+  } else if (hasMedia) {
+    const pm = await photoCheckMeasurement(take, variantId, media);
+    measurementSource = pm.boxesFrom;
+    measurementNote = pm.measurementNote;
+    const m = pm.measurement;
+    if (m) {
+      if (pm.samFailure) {
+        const reason = `SAM 3.1 could not supply this take's measurements (${pm.samFailure}) Framing and crop safety cannot be measured without them, so both are uncertain rather than guessed.`;
+        Object.assign(byId.framing, { verdict: "uncertain", detail: reason, source: "model-error" });
+        Object.assign(byId.crop, { verdict: "uncertain", detail: reason, source: "model-error" });
+      } else {
+        const boxSource = pm.boxesFrom === "sam" ? "sam" : "measured";
+        if (m.framing) {
+          Object.assign(byId.framing, { verdict: m.framing.verdict, detail: m.framing.detail, source: boxSource });
+        }
+        if (m.cropSafety) {
+          Object.assign(byId.crop, { verdict: m.cropSafety.verdict, detail: m.cropSafety.detail, source: boxSource });
+        }
+      }
+      Object.assign(byId.quality, { verdict: m.quality.verdict, detail: m.quality.detail, source: "measured" });
+    }
+    Object.assign(byId.audio, {
+      verdict: "uncertain",
+      detail: "Still photo: there is no audio track to check.",
+      source: "determined",
+    });
+  }
+
+  if (hasMedia) {
     // The semantic pipeline judges the frame the audience will see:
     // for a photo that is the photo; for a video it is the posted frame
     // — the crop is where a banner's word is lost, so the posted frame
@@ -211,22 +384,6 @@ async function buildChecks(take, variantId) {
     });
     privacyWarning = sem.privacyWarning;
     privacyWarningSource = sem.privacyWarningSource;
-
-    if (videoMedia) {
-      Object.assign(byId.audio, {
-        verdict: "uncertain",
-        detail: videoMedia.sidecar.silent
-          ? "This video has no audio track: it is silent, so there is no speech to check — and silence the creator chose is not a defect."
-          : "This video's audio track has not been transcribed or checked yet in this build, so the check cannot settle.",
-        source: "determined",
-      });
-    } else {
-      Object.assign(byId.audio, {
-        verdict: "uncertain",
-        detail: "Still photo: there is no audio track to check.",
-        source: "determined",
-      });
-    }
   } else {
     const noMedia = `This seeded ${take.kind} has no media file yet, so there is nothing to measure or judge.`;
     for (const id of ["framing", "crop", "quality", "text", "firstImpression", "audio"]) {
@@ -242,12 +399,15 @@ async function buildChecks(take, variantId) {
   }
 
   const checks = CHECKS.map((c) => byId[c.id]);
-  const allSettled = checks.every((c) => ["measured", "model", "determined"].includes(c.source));
-  const anyRealCheck = checks.some((c) => ["measured", "model"].includes(c.source));
+  const allSettled = checks.every((c) => ["measured", "sam", "model", "determined"].includes(c.source));
+  const anyRealCheck = checks.some((c) => ["measured", "sam", "model"].includes(c.source));
   return {
     take: publicTake(take),
     variant: variantId || null,
     source: allSettled && anyRealCheck ? "live" : "partial",
+    measurementSource,
+    measurementNote,
+    transcript,
     checks,
     privacyWarning,
     privacyWarningSource,
@@ -286,7 +446,7 @@ const server = http.createServer((req, res) => {
       modelApiKeyConfigured: Boolean(process.env.MODEL_API_KEY),
       checksMode: "pipelines",
       checksNote:
-        "Framing, crop safety, and quality are measured from pixels; text, first impression, and the privacy warning come from the Muse Spark semantic pipeline; audio is determined by the take itself. Semantic calls run only when the funding switch is on (MODEL_CALLS_ENABLED) — while it is off, those checks report uncertain with the reason, never a guessed verdict.",
+        "Framing and crop safety are measured from boxes located by SAM 3.1 when live calls are on; when SAM returns no match in a take, the take's recorded facts stand, and a failed SAM call makes those checks uncertain, never guessed. Sharpness and quality are measured from pixels. Text, first impression, and the privacy warning come from the Muse Spark semantic pipeline. A video's speech track is transcribed by Muse Voice Transcribe and the audio check is judged from the transcript; a silent take reports that there is nothing to transcribe, because the silence is part of the take. Model calls run only when the funding switch is on (MODEL_CALLS_ENABLED) — while it is off, model checks report uncertain with the reason, never a guessed verdict.",
     });
   }
 
@@ -458,6 +618,9 @@ const server = http.createServer((req, res) => {
         measurementCache.delete(`${take.id}|${resultVariantId}`);
         semanticCache.delete(`${take.id}|${resultVariantId}`);
         videoMediaCache.delete(`${take.id}|${resultVariantId}`);
+        videoSamCache.delete(`${take.id}|${resultVariantId}`);
+        audioCache.delete(`${take.id}|${resultVariantId}`);
+        describedCache.delete(`${take.id}|${resultVariantId}`);
         const result = await buildChecks(take, resultVariantId);
         const before = await buildChecks(take, baseVariant);
         const targetId = (offeredList.find((r) => r.id === input.repairId) || {}).fixesCheck;
@@ -505,6 +668,50 @@ const server = http.createServer((req, res) => {
     buildChecks(take, url.searchParams.get("variant") || undefined)
       .then((result) => sendJson(res, 200, { take: publicTake(take), variant: result.variant, publicDescription: buildPublicDescription(take, result) }))
       .catch((err) => sendJson(res, 500, { error: `Public description failed: ${err.message}` }));
+    return;
+  }
+
+  const describedMatch = url.pathname.match(/^\/api\/takes\/([A-Za-z0-9-]+)\/described-audio$/);
+  if (describedMatch && req.method === "GET") {
+    const take = TAKES.find((t) => t.id === describedMatch[1]);
+    if (!take) return sendJson(res, 404, { error: "Unknown take id." });
+    if (take.kind !== "video") {
+      return sendJson(res, 200, {
+        take: publicTake(take),
+        describedAudio: {
+          available: false,
+          reason:
+            "Described audio belongs to video: a still photo has no timeline to narrate. A photo's own texts are its alt text and its proof copy.",
+        },
+      });
+    }
+    (async () => {
+      const variantId = url.searchParams.get("variant") || undefined;
+      const vm = await resolveVideoMedia(take, variantId);
+      if (!vm) {
+        return sendJson(res, 200, {
+          take: publicTake(take),
+          variant: variantId || null,
+          describedAudio: await buildDescribedAudio(take, null, null),
+        });
+      }
+      const key = `${take.id}|${variantId || ""}`;
+      if (!describedCache.has(key)) {
+        let transcript = null;
+        if (!vm.sidecar.silent) {
+          if (!audioCache.has(key)) {
+            audioCache.set(key, await runAudioCheck({ sidecar: vm.sidecar }));
+          }
+          transcript = audioCache.get(key).transcript;
+        }
+        describedCache.set(key, await buildDescribedAudio(take, vm.sidecar, transcript));
+      }
+      sendJson(res, 200, {
+        take: publicTake(take),
+        variant: variantId || null,
+        describedAudio: describedCache.get(key),
+      });
+    })().catch((err) => sendJson(res, 500, { error: `Described audio failed: ${err.message}` }));
     return;
   }
 

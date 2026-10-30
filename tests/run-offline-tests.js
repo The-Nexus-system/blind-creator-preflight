@@ -10,6 +10,11 @@
 //    with the funding reason — plugged in, honest, and costing nothing.
 // 3. The measured geometry/quality verdicts on the seeded photo takes match
 //    the design record's assertions (tests/expected-verdicts.json).
+// 4. The SAM wiring's branches (boxes used, no-match fallback, calls-off,
+//    reported failure), the audio check's branches (silent take, judged
+//    transcript, every failure shape), and the described-audio script
+//    (model draft, recorded-facts draft, gap honesty) — all through
+//    injected stubs, still no network.
 //
 // The 'whenLive' assertions in expected-verdicts.json run later, against
 // the live pipeline, once the funding switch is on and video media exists.
@@ -317,6 +322,158 @@ const { sweep } = require("../server/library");
   assert.strictEqual(v2stackedM.cropSafety.verdict, "pass", "stacked variant: the banner survives the crops");
   assert.strictEqual(v2stackedM.quality.verdict, "pass", "stacked variant: quality passes on the scoped measurement");
   ok("ST-V2 stacked chain: reframe, then the hands-up cover inside it — framing, crop, quality all pass");
+
+  // 11. SAM wiring (Oct 30, 2026): the designed model supplies the
+  // boxes when it answers; the take's recorded facts stand when it
+  // returns no match; a failed call is reported, never papered over.
+  // All branches run through injected segmenters — no network.
+  const { locateBoxes, resolvePhotoBoxes } = require("../server/sam");
+  const { ModelCallsDisabled } = require("../server/model-api");
+  const p1buf = fs.readFileSync(path.join(mediaDir, "ST-P1.png"));
+
+  const located = await locateBoxes(p1buf, async (buf, concept) =>
+    concept === "person"
+      ? [{ x0: 0, y0: 0, x1: 10, y1: 10 }, { x0: 324, y0: 201, x1: 676, y1: 798 }]
+      : [{ x0: 301, y0: 621, x1: 699, y1: 720 }]
+  );
+  assert.strictEqual(located.status, "ok");
+  assert.deepStrictEqual(located.subject, { x0: 324, y0: 201, x1: 676, y1: 798 }, "the largest person box is the subject");
+  assert.deepStrictEqual(located.sign, { x0: 301, y0: 621, x1: 699, y1: 720 });
+  ok("SAM locate: one call per concept, the largest box per concept is used");
+
+  const samResolved = await resolvePhotoBoxes({
+    buffer: p1buf,
+    recorded: p1gt,
+    segmenter: async (buf, concept) =>
+      concept === "person" ? [{ x0: 324, y0: 201, x1: 676, y1: 798 }] : [{ x0: 301, y0: 621, x1: 699, y1: 720 }],
+  });
+  assert.strictEqual(samResolved.kind, "sam");
+  const samMeasured = await measureImage(p1buf, samResolved.groundTruth);
+  assert.strictEqual(samMeasured.framing.verdict, "pass", "ST-P1 framing passes on SAM's boxes");
+  assert.strictEqual(samMeasured.cropSafety.verdict, "pass", "ST-P1 crop passes on SAM's boxes");
+  ok("SAM boxes feed the measurement in place of the sidecar, verdicts unchanged");
+
+  const noMatch = await resolvePhotoBoxes({
+    buffer: p4buf,
+    recorded: p4gt,
+    segmenter: async () => [],
+  });
+  assert.strictEqual(noMatch.kind, "recorded");
+  assert.strictEqual(noMatch.samAnswered, true, "a no-match is SAM's answer, not silence");
+  const noMatchMeasured = await measureImage(p4buf, noMatch.groundTruth);
+  assert.strictEqual(noMatchMeasured.cropSafety.verdict, "fix", "ST-P4's designed crop fix survives on the recorded facts");
+  ok("SAM no-match: the take's recorded facts stand and the designed verdict holds");
+
+  const callsOff = await resolvePhotoBoxes({
+    buffer: p1buf,
+    recorded: p1gt,
+    segmenter: async () => { throw new ModelCallsDisabled(); },
+  });
+  assert.strictEqual(callsOff.kind, "recorded");
+  assert.strictEqual(callsOff.samAnswered, false, "calls off is not reported as a SAM answer");
+  const failed = await resolvePhotoBoxes({
+    buffer: p1buf,
+    recorded: p1gt,
+    segmenter: async () => { throw new Error("SAM call failed with HTTP 500."); },
+  });
+  assert.strictEqual(failed.kind, "failed");
+  assert(failed.reason.includes("HTTP 500"), "the failure reason is carried for the uncertain verdicts");
+  ok("SAM resolution: calls-off falls back quietly; a real failure is reported, never hidden");
+
+  // 12. Audio check, wired to transcription (stubs; no network). The
+  // silent branch must not touch the transcriber at all — there is no
+  // track to transcribe.
+  const { runAudioCheck } = require("../server/audio");
+  const silentAudio = await runAudioCheck({
+    sidecar: { silent: true },
+    transcriber: async () => { throw new Error("must never be called for a silent take"); },
+  });
+  assert.strictEqual(silentAudio.source, "determined");
+  assert(silentAudio.detail.includes("Muse Voice Transcribe"), "the silent result names the transcription step");
+  assert(silentAudio.detail.includes("silence is part of the take"), "and states the silence is part of the take");
+  assert.strictEqual(silentAudio.transcript, null);
+  ok("audio: a silent take names the transcription step and its own silence, with no model call");
+
+  const speechSidecar = { silent: false, audioFile: "ST-X.wav" };
+  const readSome = () => Buffer.from("fake audio bytes");
+  const spoken = await runAudioCheck({
+    sidecar: speechSidecar,
+    readAudio: readSome,
+    transcriber: async () => "hello everyone this is the announcement",
+  });
+  assert.strictEqual(spoken.verdict, "pass");
+  assert.strictEqual(spoken.source, "model");
+  assert(spoken.transcript.includes("announcement"), "the transcript is returned for the proof copy");
+  const emptyTranscript = await runAudioCheck({
+    sidecar: speechSidecar,
+    readAudio: readSome,
+    transcriber: async () => "   ",
+  });
+  assert.strictEqual(emptyTranscript.verdict, "uncertain", "no recovered words stays uncertain — words are never invented");
+  const transcribeOff = await runAudioCheck({
+    sidecar: speechSidecar,
+    readAudio: readSome,
+    transcriber: async () => { throw new ModelCallsDisabled(); },
+  });
+  assert.strictEqual(transcribeOff.source, "model-off");
+  const transcribeFailed = await runAudioCheck({
+    sidecar: speechSidecar,
+    readAudio: readSome,
+    transcriber: async () => { throw new Error("Transcribe call failed with HTTP 500."); },
+  });
+  assert.strictEqual(transcribeFailed.source, "model-error");
+  assert.strictEqual(transcribeFailed.verdict, "uncertain");
+  const noAudioFile = await runAudioCheck({
+    sidecar: speechSidecar,
+    readAudio: () => null,
+    transcriber: async () => "unreachable",
+  });
+  assert.strictEqual(noAudioFile.verdict, "uncertain");
+  assert(noAudioFile.detail.includes("no separate audio file"), "a speech track the backend cannot reach is stated plainly");
+  ok("audio: transcription judges speech takes — pass on recovered words, uncertain on every failure shape");
+
+  const spokenResult = { ...passResult, transcript: "hello everyone this is the announcement" };
+  const spokenProof = buildProofCopy(fakeTake, spokenResult);
+  assert(spokenProof.includes("What was said (transcribed by Muse Voice Transcribe):"), "the proof copy carries the speech as its own section");
+  assert(spokenProof.includes("announcement"));
+  ok("proof copy: the transcript appears as the speech section, separate from the visual checks");
+
+  // 13. Described-audio script for ST-V2: drafted from the recorded
+  // timeline, model when it answers readably, recorded-facts otherwise,
+  // always a draft. A speech take without a transcript gets no script.
+  const { buildDescribedAudio, parseScript } = require("../server/narrate");
+  const { TAKES } = require("../server/seed-takes");
+  const v2take = TAKES.find((t) => t.id === "ST-V2");
+  const daOff = await buildDescribedAudio(v2take, v2sidecar, null, async () => { throw new ModelCallsDisabled(); });
+  assert.strictEqual(daOff.available, true);
+  assert.strictEqual(daOff.state, "draft", "a script is a draft until the creator approves it");
+  assert.strictEqual(daOff.source, "recorded-facts");
+  assert.deepStrictEqual(
+    daOff.segments.map((s) => [s.start, s.end]),
+    [[0, 9], [9, 12], [12, 15]],
+    "segments follow the recorded timeline: banner, hands up 9-12, ending"
+  );
+  assert(daOff.segments[0].text.includes("SIGNAL OVER NOISE TOUR"), "the opening segment reads the banner's recorded text");
+  assert(daOff.segments[1].text.includes("signs"), "the hands-up window is described as signing");
+  ok("described audio: ST-V2's script drafts from the recorded timeline when calls are off");
+
+  const daModel = await buildDescribedAudio(v2take, v2sidecar, null, async () =>
+    JSON.stringify({ segments: [{ start: 0, end: 15, text: "The creator stands before a banner for the whole video." }] })
+  );
+  assert.strictEqual(daModel.source, "model");
+  assert.strictEqual(daModel.segments.length, 1);
+  const daGarbage = await buildDescribedAudio(v2take, v2sidecar, null, async () => "no json here");
+  assert.strictEqual(daGarbage.source, "recorded-facts", "an unreadable model reply falls back to the recorded-facts draft");
+  assert.strictEqual(parseScript(JSON.stringify({ segments: [{ start: 5, end: 5, text: "x" }] }), 15), null, "an empty span is distrusted");
+  assert.strictEqual(parseScript(JSON.stringify({ segments: [{ start: 0, end: 99, text: "x" }] }), 15), null, "a segment past the duration is distrusted");
+  ok("described audio: a readable model draft is used; an unreadable one is distrusted to the fallback");
+
+  const daSpeech = await buildDescribedAudio(v2take, { ...v2sidecar, silent: false }, null, async () => "unreachable");
+  assert.strictEqual(daSpeech.available, false, "a speech take without a transcript gets no guessed timings");
+  assert(daSpeech.reason.includes("transcript"));
+  const daNoMedia = await buildDescribedAudio(v2take, null, null, async () => "unreachable");
+  assert.strictEqual(daNoMedia.available, false);
+  ok("described audio: gap honesty — no transcript, no script; no media, no script");
 
   console.log(`\n${passed} test groups passed.`);
 }

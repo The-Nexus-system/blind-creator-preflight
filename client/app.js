@@ -19,6 +19,7 @@ const composerStatusEl = document.getElementById("composer-status");
 
 const SOURCE_WORDS = {
   measured: "measured",
+  sam: "measured by SAM 3.1",
   model: "model check",
   determined: "from the take itself",
   "model-off": "model check not run",

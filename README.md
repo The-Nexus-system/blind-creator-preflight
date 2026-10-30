@@ -21,7 +21,12 @@ The creator then gets two things in their own words to approve: alt text drafted
 
 ## How it is built
 
-- Checks are computed through the Meta Model API (Muse Spark, SAM 3.1, Muse Voice Transcribe, Muse Image for generative repairs only), called from a small backend that holds the API key in its secrets. The key never appears in this repository or in any client.
+- The checks run through the Meta Model API, called from a small backend that holds the API key in its secrets. The key never appears in this repository or in any client. Each model does the part the design assigns it:
+  - SAM 3.1 locates the subject and the sign in a take, and framing and crop safety are measured from its boxes. When SAM returns no match in a take, the take's recorded facts stand and the response says so; a failed SAM call makes those checks uncertain, never guessed. Sharpness and quality are measured from the pixels directly.
+  - Muse Spark judges the text in the image, the first impression, and the private-information warning.
+  - Muse Voice Transcribe transcribes a video's speech track, and the audio check is judged from the transcript. A silent take reports that there is nothing to transcribe, because the silence is part of the take.
+  - A described-audio script for a video is drafted from the take's recorded timeline — by Muse Spark when live calls are on, assembled from the recorded facts when they are off — and stays a draft until the creator approves it.
+  - Repairs are deterministic operations the app performs itself (re-crop, reframe, exposure, cover-frame choice). No generative model edits the media, and Muse Image is not used in this build.
 - Standard API data terms only. The discounted contributor tier, which permits training on prompts and completions, is never used.
 - Accessibility is the requirement, not a feature: every flow completes with a screen reader and braille display alone, every status exists as plain text, and "uncertain" is always an allowed answer — the app never guesses a pass.
 
