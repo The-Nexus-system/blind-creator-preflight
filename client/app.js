@@ -20,6 +20,7 @@ const composerStatusEl = document.getElementById("composer-status");
 const SOURCE_WORDS = {
   measured: "measured",
   sam: "measured by SAM 3.1",
+  judgement: "measured by Muse Spark's judgement",
   model: "model check",
   determined: "from the take itself",
   "model-off": "model check not run",

@@ -11,10 +11,12 @@
 // 3. The measured geometry/quality verdicts on the seeded photo takes match
 //    the design record's assertions (tests/expected-verdicts.json).
 // 4. The SAM wiring's branches (boxes used, no-match fallback, calls-off,
-//    reported failure), the audio check's branches (silent take, judged
-//    transcript, every failure shape), and the described-audio script
-//    (model draft, recorded-facts draft, gap honesty) — all through
-//    injected stubs, still no network.
+//    reported failure), the Spark-judgement tier behind it (estimates
+//    used and labelled, garbage distrusted, calls-off uncertain, recorded
+//    facts outranking the estimate), the audio check's branches (silent
+//    take, judged transcript, every failure shape), and the
+//    described-audio script (model draft, recorded-facts draft, gap
+//    honesty) — all through injected stubs, still no network.
 //
 // The 'whenLive' assertions in expected-verdicts.json run later, against
 // the live pipeline, once the funding switch is on and video media exists.
@@ -474,6 +476,96 @@ const { sweep } = require("../server/library");
   const daNoMedia = await buildDescribedAudio(v2take, null, null, async () => "unreachable");
   assert.strictEqual(daNoMedia.available, false);
   ok("described audio: gap honesty — no transcript, no script; no media, no script");
+
+  // 14. The Spark-judgement tier (Oct 30, 2026): when SAM answers with
+  // no match AND the take has no recorded facts, Muse Spark estimates
+  // the boxes and the measurement runs on the estimate, labelled
+  // judgement. Recorded facts outrank the estimate; garbage and
+  // calls-off both end in uncertainty, never a verdict.
+  const { estimateBoxes, parseBoxes } = require("../server/judge");
+  const estimated = { subject: { x0: 324, y0: 201, x1: 676, y1: 798 }, sign: { x0: 301, y0: 621, x1: 699, y1: 720 } };
+
+  const judged = await resolvePhotoBoxes({
+    buffer: p1buf,
+    recorded: null,
+    segmenter: async () => [],
+    judge: async () => ({ status: "ok", ...estimated }),
+  });
+  assert.strictEqual(judged.kind, "judgement", "no SAM match and no recorded facts reaches the judgement tier");
+  const judgedMeasured = await measureImage(p1buf, judged.groundTruth);
+  assert.strictEqual(judgedMeasured.framing.verdict, "pass", "framing is computed from the estimated box");
+  assert.strictEqual(judgedMeasured.cropSafety.verdict, "pass", "crop safety is computed from the estimated boxes");
+  ok("judgement tier: SAM no-match + no recorded facts → framing/crop measured from Spark's estimate");
+
+  let judgeCalled = false;
+  const recordedWins = await resolvePhotoBoxes({
+    buffer: p4buf,
+    recorded: p4gt,
+    segmenter: async () => [],
+    judge: async () => { judgeCalled = true; return { status: "ok", ...estimated }; },
+  });
+  assert.strictEqual(recordedWins.kind, "recorded", "recorded facts outrank the judgement tier");
+  assert.strictEqual(recordedWins.samAnswered, true);
+  assert.strictEqual(judgeCalled, false, "the estimate is never asked for when recorded facts exist");
+  ok("judgement tier: a take with recorded facts never falls through to the estimate");
+
+  // The parser's distrust discipline, same as the semantic pipeline's.
+  assert.strictEqual(parseBoxes("not json at all", 1000, 1000), null);
+  assert.strictEqual(
+    parseBoxes(JSON.stringify({ subject: { x0: 0, y0: 0, x1: 1200, y1: 500 }, sign: null }), 1000, 1000),
+    null,
+    "an out-of-range box is distrusted"
+  );
+  assert.strictEqual(
+    parseBoxes(JSON.stringify({ subject: { x0: 500, y0: 0, x1: 500, y1: 500 }, sign: null }), 1000, 1000),
+    null,
+    "a zero-extent box is distrusted"
+  );
+  assert.strictEqual(
+    parseBoxes(JSON.stringify({ subject: { x0: 1, y0: 2, x1: 3, y1: 4 }, sign: { x0: 0, y0: 0, x1: 0, y1: 9 } }), 1000, 1000),
+    null,
+    "a malformed sign box distrusts the whole reply"
+  );
+  assert.deepStrictEqual(
+    parseBoxes(JSON.stringify(estimated), 1000, 1000),
+    estimated,
+    "a well-formed reply parses"
+  );
+  ok("judgement parser: non-JSON, out-of-range, and zero-extent replies are all distrusted");
+
+  const stubChatBoxes = await estimateBoxes(p1buf, "intent", async () =>
+    JSON.stringify({ subject: { x0: 10, y0: 20, x1: 900, y1: 950 }, sign: null })
+  );
+  assert.strictEqual(stubChatBoxes.status, "ok");
+  assert.deepStrictEqual(stubChatBoxes.subject, { x0: 10, y0: 20, x1: 900, y1: 950 });
+  await assert.rejects(
+    () => estimateBoxes(p1buf, "intent", async () => "no boxes here"),
+    /not trusted/,
+    "an unreadable estimate reply throws rather than returning boxes"
+  );
+  const garbage = await resolvePhotoBoxes({
+    buffer: p1buf,
+    recorded: null,
+    segmenter: async () => [],
+    judge: async () => { throw new Error("The model reply could not be read as the required box shape, so it is not trusted."); },
+  });
+  assert.strictEqual(garbage.kind, "judgement-unavailable");
+  assert(garbage.reason.includes("uncertain rather than guessed"), "the untrusted estimate ends in stated uncertainty");
+  ok("judgement tier: an untrusted Spark reply makes framing/crop uncertain, never a verdict on garbage");
+
+  const offNoRecorded = await resolvePhotoBoxes({
+    buffer: p1buf,
+    recorded: null,
+    segmenter: async () => { throw new ModelCallsDisabled(); },
+    judge: async () => { judgeCalled = true; return { status: "ok", ...estimated }; },
+  });
+  assert.strictEqual(offNoRecorded.kind, "judgement-unavailable");
+  assert.strictEqual(offNoRecorded.callsOff, true);
+  assert(offNoRecorded.reason.includes("switched off"), "the reason names the funding switch");
+  assert.strictEqual(judgeCalled, false, "with calls off, no estimate is attempted");
+  const estimateOff = await estimateBoxes(p1buf, "intent", async () => { throw new ModelCallsDisabled(); });
+  assert.strictEqual(estimateOff.status, "disabled", "the estimator reports calls-off as a status, not an error");
+  ok("judgement tier: calls off + no recorded facts → uncertain, with the switch named as the reason");
 
   console.log(`\n${passed} test groups passed.`);
 }

@@ -22,7 +22,7 @@ The creator then gets two things in their own words to approve: alt text drafted
 ## How it is built
 
 - The checks run through the Meta Model API, called from a small backend that holds the API key in its secrets. The key never appears in this repository or in any client. Each model does the part the design assigns it:
-  - SAM 3.1 locates the subject and the sign in a take, and framing and crop safety are measured from its boxes. When SAM returns no match in a take, the take's recorded facts stand and the response says so; a failed SAM call makes those checks uncertain, never guessed. Sharpness and quality are measured from the pixels directly.
+  - SAM 3.1 locates the subject and the sign in a take, and framing and crop safety are measured from its boxes. When SAM returns no match in a take, the take's recorded facts stand and the response says so; a failed SAM call makes those checks uncertain, never guessed. Sharpness and quality are measured from the pixels directly. The fallback order for those measurements is: SAM 3.1's boxes first; the take's recorded facts where a take has them; otherwise Muse Spark's judgement, labelled as judgement in the response.
   - Muse Spark judges the text in the image, the first impression, and the private-information warning.
   - Muse Voice Transcribe transcribes a video's speech track, and the audio check is judged from the transcript. A silent take reports that there is nothing to transcribe, because the silence is part of the take.
   - A described-audio script for a video is drafted from the take's recorded timeline — by Muse Spark when live calls are on, assembled from the recorded facts when they are off — and stays a draft until the creator approves it.

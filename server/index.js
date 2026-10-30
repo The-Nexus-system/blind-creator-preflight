@@ -175,12 +175,14 @@ async function measureTake(take, variantId) {
 }
 
 // The measurement a PHOTO take's checks use. An original take's boxes
-// come from SAM 3.1 when it answers with a subject (server/sam.js holds
-// the outcome rules: SAM boxes, recorded facts on a no-match or with
-// calls off, and a reported failure otherwise); a repaired variant
-// keeps the repair's own computed geometry. On a SAM failure the
-// returned measurement carries quality only — framing and crop need
-// boxes — and samFailure names the reason, so the checks go uncertain
+// come down the fallback chain (server/sam.js holds the outcome rules):
+// SAM 3.1 when it answers with a subject; the take's recorded facts on
+// a no-match or with calls off; Muse Spark's judgement, reported as
+// judgement, when SAM finds no match and the take has no recorded
+// facts; and a reported failure otherwise. A repaired variant keeps
+// the repair's own computed geometry. On a failure the returned
+// measurement carries quality only — framing and crop need boxes —
+// and the failure field names the reason, so the checks go uncertain
 // with it rather than guessing. Failures are not cached: a later
 // request retries the call.
 async function photoCheckMeasurement(take, variantId, media) {
@@ -191,12 +193,14 @@ async function photoCheckMeasurement(take, variantId, media) {
       measurementNote:
         "Framing and crop safety are measured from this repaired version's own geometry — the boxes the repair itself computed.",
       samFailure: null,
+      judgementFailure: null,
     };
   }
   if (!photoSamCache.has(take.id)) {
     const resolved = await resolvePhotoBoxes({
       buffer: media.buffer,
       recorded: media.groundTruth,
+      intent: take.intent,
     });
     if (resolved.kind === "failed") {
       return {
@@ -204,22 +208,36 @@ async function photoCheckMeasurement(take, variantId, media) {
         boxesFrom: "sam-failed",
         measurementNote: null,
         samFailure: resolved.reason,
+        judgementFailure: null,
+      };
+    }
+    if (resolved.kind === "judgement-unavailable") {
+      return {
+        measurement: await measureImage(media.buffer, null, null),
+        boxesFrom: "judgement-unavailable",
+        measurementNote: null,
+        samFailure: null,
+        judgementFailure: resolved.reason,
+        judgementFailureSource: resolved.callsOff ? "model-off" : "model-error",
       };
     }
     const measurement =
-      resolved.kind === "sam"
+      resolved.kind === "sam" || resolved.kind === "judgement"
         ? await measureImage(media.buffer, resolved.groundTruth, null)
         : await measureTake(take, null);
     photoSamCache.set(take.id, {
       measurement,
-      boxesFrom: resolved.kind === "sam" ? "sam" : "recorded",
+      boxesFrom: resolved.kind,
       measurementNote:
         resolved.kind === "sam"
           ? "Framing and crop safety are measured from boxes located by SAM 3.1."
-          : resolved.samAnswered
-            ? "SAM 3.1 was asked for the subject and the sign and returned no match in this take, so framing and crop safety are measured from the take's recorded facts."
-            : null,
+          : resolved.kind === "judgement"
+            ? "SAM 3.1 was asked for the subject and returned no match in this take, and the take has no recorded facts to measure from, so framing and crop safety are measured from Muse Spark's judgement — an estimate, not a SAM measurement."
+            : resolved.samAnswered
+              ? "SAM 3.1 was asked for the subject and the sign and returned no match in this take, so framing and crop safety are measured from the take's recorded facts."
+              : null,
       samFailure: null,
+      judgementFailure: null,
     });
   }
   return photoSamCache.get(take.id);
@@ -280,6 +298,9 @@ async function videoSamFraming(take, variantId, videoMedia) {
 // - "measured": computed from the take's pixels by measure.js, using the
 //   take's recorded facts (or a repair's computed geometry);
 // - "sam": framing/crop measured from boxes located by SAM 3.1;
+// - "judgement": framing/crop measured from boxes Muse Spark estimated
+//   by judgement — SAM returned no match and the take has no recorded
+//   facts; an estimate, labelled as judgement, never as a SAM measurement;
 // - "model": judged by the semantic pipeline (Muse Spark) or, for the
 //   audio check, from a Muse Voice Transcribe transcript;
 // - "determined": settled by the take itself (a still photo has no audio;
@@ -345,8 +366,20 @@ async function buildChecks(take, variantId) {
         const reason = `SAM 3.1 could not supply this take's measurements (${pm.samFailure}) Framing and crop safety cannot be measured without them, so both are uncertain rather than guessed.`;
         Object.assign(byId.framing, { verdict: "uncertain", detail: reason, source: "model-error" });
         Object.assign(byId.crop, { verdict: "uncertain", detail: reason, source: "model-error" });
+      } else if (pm.judgementFailure) {
+        Object.assign(byId.framing, {
+          verdict: "uncertain",
+          detail: pm.judgementFailure,
+          source: pm.judgementFailureSource || "model-error",
+        });
+        Object.assign(byId.crop, {
+          verdict: "uncertain",
+          detail: pm.judgementFailure,
+          source: pm.judgementFailureSource || "model-error",
+        });
       } else {
-        const boxSource = pm.boxesFrom === "sam" ? "sam" : "measured";
+        const boxSource =
+          pm.boxesFrom === "sam" ? "sam" : pm.boxesFrom === "judgement" ? "judgement" : "measured";
         if (m.framing) {
           Object.assign(byId.framing, { verdict: m.framing.verdict, detail: m.framing.detail, source: boxSource });
         }
@@ -399,8 +432,8 @@ async function buildChecks(take, variantId) {
   }
 
   const checks = CHECKS.map((c) => byId[c.id]);
-  const allSettled = checks.every((c) => ["measured", "sam", "model", "determined"].includes(c.source));
-  const anyRealCheck = checks.some((c) => ["measured", "sam", "model"].includes(c.source));
+  const allSettled = checks.every((c) => ["measured", "sam", "judgement", "model", "determined"].includes(c.source));
+  const anyRealCheck = checks.some((c) => ["measured", "sam", "judgement", "model"].includes(c.source));
   return {
     take: publicTake(take),
     variant: variantId || null,
@@ -446,7 +479,7 @@ const server = http.createServer((req, res) => {
       modelApiKeyConfigured: Boolean(process.env.MODEL_API_KEY),
       checksMode: "pipelines",
       checksNote:
-        "Framing and crop safety are measured from boxes located by SAM 3.1 when live calls are on; when SAM returns no match in a take, the take's recorded facts stand, and a failed SAM call makes those checks uncertain, never guessed. Sharpness and quality are measured from pixels. Text, first impression, and the privacy warning come from the Muse Spark semantic pipeline. A video's speech track is transcribed by Muse Voice Transcribe and the audio check is judged from the transcript; a silent take reports that there is nothing to transcribe, because the silence is part of the take. Model calls run only when the funding switch is on (MODEL_CALLS_ENABLED) — while it is off, model checks report uncertain with the reason, never a guessed verdict.",
+        "Framing and crop safety are measured from boxes located by SAM 3.1 when live calls are on; when SAM returns no match in a take, the take's recorded facts stand, and when a take has no recorded facts either, Muse Spark estimates the boxes by judgement and the checks say so — an estimate, never presented as a SAM measurement; a failed SAM call makes those checks uncertain, never guessed. Sharpness and quality are measured from pixels. Text, first impression, and the privacy warning come from the Muse Spark semantic pipeline. A video's speech track is transcribed by Muse Voice Transcribe and the audio check is judged from the transcript; a silent take reports that there is nothing to transcribe, because the silence is part of the take. Model calls run only when the funding switch is on (MODEL_CALLS_ENABLED) — while it is off, model checks report uncertain with the reason, never a guessed verdict.",
     });
   }
 
