@@ -10,13 +10,13 @@
 //    with the funding reason — plugged in, honest, and costing nothing.
 // 3. The measured geometry/quality verdicts on the seeded photo takes match
 //    the design record's assertions (tests/expected-verdicts.json).
-// 4. The SAM wiring's branches (boxes used, no-match fallback, calls-off,
-//    reported failure), the Spark-judgement tier behind it (estimates
-//    used and labelled, garbage distrusted, calls-off uncertain, recorded
-//    facts outranking the estimate), the audio check's branches (silent
-//    take, judged transcript, every failure shape), and the
-//    described-audio script (model draft, recorded-facts draft, gap
-//    honesty) — all through injected stubs, still no network.
+// 4. The SAM wiring's branches (boxes used, no-match handing to the
+//    Spark-judgement tier, calls-off, reported failure), the judgement
+//    tier itself in the Nexus's corrected order (SAM, then judgement,
+//    recorded facts last), the audio check's branches (silent take,
+//    judged transcript, every failure shape), and the described-audio
+//    script (model draft, recorded-facts draft, gap honesty) — all
+//    through injected stubs, still no network.
 //
 // The 'whenLive' assertions in expected-verdicts.json run later, against
 // the live pipeline, once the funding switch is on and video media exists.
@@ -477,37 +477,92 @@ const { sweep } = require("../server/library");
   assert.strictEqual(daNoMedia.available, false);
   ok("described audio: gap honesty — no transcript, no script; no media, no script");
 
-  // 14. The Spark-judgement tier (Oct 30, 2026): when SAM answers with
-  // no match AND the take has no recorded facts, Muse Spark estimates
-  // the boxes and the measurement runs on the estimate, labelled
-  // judgement. Recorded facts outrank the estimate; garbage and
-  // calls-off both end in uncertainty, never a verdict.
+  // 14. The Spark-judgement tier, in the Nexus's corrected order
+  // (Oct 30, 2026): SAM first, then Spark judgement, recorded facts
+  // LAST. A usable Spark estimate sources the measurement even when
+  // recorded facts exist; only a judgement that cannot supply boxes
+  // falls through to them.
   const { estimateBoxes, parseBoxes } = require("../server/judge");
   const estimated = { subject: { x0: 324, y0: 201, x1: 676, y1: 798 }, sign: { x0: 301, y0: 621, x1: 699, y1: 720 } };
 
-  const judged = await resolvePhotoBoxes({
+  let judgeCalled = false;
+  const judgedFirst = await resolvePhotoBoxes({
+    buffer: p1buf,
+    recorded: p1gt,
+    segmenter: async () => [],
+    judge: async () => { judgeCalled = true; return { status: "ok", ...estimated }; },
+  });
+  assert.strictEqual(judgedFirst.kind, "judgement", "a usable estimate sources the measurement even when recorded facts exist");
+  assert.strictEqual(judgeCalled, true, "the judgement tier is asked before the recorded facts are used");
+  const judgedMeasured = await measureImage(p1buf, judgedFirst.groundTruth);
+  assert.strictEqual(judgedMeasured.framing.verdict, "pass", "framing is computed from the estimated box");
+  assert.strictEqual(judgedMeasured.cropSafety.verdict, "pass", "crop safety is computed from the estimated boxes");
+  ok("judgement tier (corrected order): SAM no-match → Spark's estimate sources framing/crop, recorded facts notwithstanding");
+
+  const judgedNoRecorded = await resolvePhotoBoxes({
     buffer: p1buf,
     recorded: null,
     segmenter: async () => [],
     judge: async () => ({ status: "ok", ...estimated }),
   });
-  assert.strictEqual(judged.kind, "judgement", "no SAM match and no recorded facts reaches the judgement tier");
-  const judgedMeasured = await measureImage(p1buf, judged.groundTruth);
-  assert.strictEqual(judgedMeasured.framing.verdict, "pass", "framing is computed from the estimated box");
-  assert.strictEqual(judgedMeasured.cropSafety.verdict, "pass", "crop safety is computed from the estimated boxes");
-  ok("judgement tier: SAM no-match + no recorded facts → framing/crop measured from Spark's estimate");
+  assert.strictEqual(judgedNoRecorded.kind, "judgement", "with no recorded facts the estimate is still the second tier");
+  ok("judgement tier: SAM no-match + no recorded facts → the estimate sources the measurement");
 
-  let judgeCalled = false;
-  const recordedWins = await resolvePhotoBoxes({
+  const missFallsToRecorded = await resolvePhotoBoxes({
     buffer: p4buf,
     recorded: p4gt,
     segmenter: async () => [],
+    judge: async () => { throw new Error("The model reply could not be read as the required box shape, so it is not trusted."); },
+  });
+  assert.strictEqual(missFallsToRecorded.kind, "recorded", "an untrusted estimate falls through to the recorded facts");
+  assert.strictEqual(missFallsToRecorded.judgementMiss.mode, "error", "the miss is reported, not hidden");
+  const missMeasured = await measureImage(p4buf, missFallsToRecorded.groundTruth);
+  assert.strictEqual(missMeasured.cropSafety.verdict, "fix", "ST-P4's designed crop fix holds on the recorded facts");
+  ok("judgement tier: Spark malformed → recorded facts used, source recorded, miss reported");
+
+  const garbageNoRecorded = await resolvePhotoBoxes({
+    buffer: p1buf,
+    recorded: null,
+    segmenter: async () => [],
+    judge: async () => { throw new Error("The model reply could not be read as the required box shape, so it is not trusted."); },
+  });
+  assert.strictEqual(garbageNoRecorded.kind, "judgement-unavailable");
+  assert(garbageNoRecorded.reason.includes("uncertain rather than guessed"), "with no tier left, the outcome is stated uncertainty");
+  ok("judgement tier: an untrusted Spark reply with no recorded facts → uncertain, never a verdict on garbage");
+
+  const offNoRecorded = await resolvePhotoBoxes({
+    buffer: p1buf,
+    recorded: null,
+    segmenter: async () => { throw new ModelCallsDisabled(); },
     judge: async () => { judgeCalled = true; return { status: "ok", ...estimated }; },
   });
-  assert.strictEqual(recordedWins.kind, "recorded", "recorded facts outrank the judgement tier");
-  assert.strictEqual(recordedWins.samAnswered, true);
-  assert.strictEqual(judgeCalled, false, "the estimate is never asked for when recorded facts exist");
-  ok("judgement tier: a take with recorded facts never falls through to the estimate");
+  assert.strictEqual(offNoRecorded.kind, "judgement-unavailable");
+  assert.strictEqual(offNoRecorded.callsOff, true);
+  assert(offNoRecorded.reason.includes("switched off"), "the reason names the funding switch");
+  const offWithRecorded = await resolvePhotoBoxes({
+    buffer: p1buf,
+    recorded: p1gt,
+    segmenter: async () => { throw new ModelCallsDisabled(); },
+    judge: async () => { throw new Error("must never be called with calls off"); },
+  });
+  assert.strictEqual(offWithRecorded.kind, "recorded", "calls off + recorded facts → recorded");
+  assert.strictEqual(offWithRecorded.samAnswered, false, "calls off is not reported as a SAM answer");
+  assert.strictEqual(offWithRecorded.judgementMiss, null, "with calls off the judgement tier is never reached");
+  const estimateOff = await estimateBoxes(p1buf, "intent", async () => { throw new ModelCallsDisabled(); });
+  assert.strictEqual(estimateOff.status, "disabled", "the estimator reports calls-off as a status, not an error");
+  ok("judgement tier: calls off → recorded facts where they exist, uncertain where they do not");
+
+  judgeCalled = false;
+  const samWins = await resolvePhotoBoxes({
+    buffer: p1buf,
+    recorded: null,
+    segmenter: async (buf, concept) =>
+      concept === "person" ? [{ x0: 324, y0: 201, x1: 676, y1: 798 }] : [{ x0: 301, y0: 621, x1: 699, y1: 720 }],
+    judge: async () => { judgeCalled = true; return { status: "ok", subject: { x0: 0, y0: 0, x1: 5, y1: 5 }, sign: null }; },
+  });
+  assert.strictEqual(samWins.kind, "sam", "a SAM match still wins over everything");
+  assert.strictEqual(judgeCalled, false, "the judgement tier is never asked when SAM matches");
+  ok("judgement tier: a SAM match outranks the estimate entirely");
 
   // The parser's distrust discipline, same as the semantic pipeline's.
   assert.strictEqual(parseBoxes("not json at all", 1000, 1000), null);
@@ -531,8 +586,6 @@ const { sweep } = require("../server/library");
     estimated,
     "a well-formed reply parses"
   );
-  ok("judgement parser: non-JSON, out-of-range, and zero-extent replies are all distrusted");
-
   const stubChatBoxes = await estimateBoxes(p1buf, "intent", async () =>
     JSON.stringify({ subject: { x0: 10, y0: 20, x1: 900, y1: 950 }, sign: null })
   );
@@ -543,29 +596,7 @@ const { sweep } = require("../server/library");
     /not trusted/,
     "an unreadable estimate reply throws rather than returning boxes"
   );
-  const garbage = await resolvePhotoBoxes({
-    buffer: p1buf,
-    recorded: null,
-    segmenter: async () => [],
-    judge: async () => { throw new Error("The model reply could not be read as the required box shape, so it is not trusted."); },
-  });
-  assert.strictEqual(garbage.kind, "judgement-unavailable");
-  assert(garbage.reason.includes("uncertain rather than guessed"), "the untrusted estimate ends in stated uncertainty");
-  ok("judgement tier: an untrusted Spark reply makes framing/crop uncertain, never a verdict on garbage");
-
-  const offNoRecorded = await resolvePhotoBoxes({
-    buffer: p1buf,
-    recorded: null,
-    segmenter: async () => { throw new ModelCallsDisabled(); },
-    judge: async () => { judgeCalled = true; return { status: "ok", ...estimated }; },
-  });
-  assert.strictEqual(offNoRecorded.kind, "judgement-unavailable");
-  assert.strictEqual(offNoRecorded.callsOff, true);
-  assert(offNoRecorded.reason.includes("switched off"), "the reason names the funding switch");
-  assert.strictEqual(judgeCalled, false, "with calls off, no estimate is attempted");
-  const estimateOff = await estimateBoxes(p1buf, "intent", async () => { throw new ModelCallsDisabled(); });
-  assert.strictEqual(estimateOff.status, "disabled", "the estimator reports calls-off as a status, not an error");
-  ok("judgement tier: calls off + no recorded facts → uncertain, with the switch named as the reason");
+  ok("judgement parser: non-JSON, out-of-range, and zero-extent replies are all distrusted");
 
   console.log(`\n${passed} test groups passed.`);
 }

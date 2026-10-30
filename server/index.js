@@ -25,6 +25,7 @@ const { measureImage, measureVideoFrames } = require("./measure");
 const { Jimp } = require("jimp");
 const { runSemanticChecks } = require("./semantic");
 const { locateBoxes, resolvePhotoBoxes } = require("./sam");
+const { estimateBoxes } = require("./judge");
 const { runAudioCheck } = require("./audio");
 const { buildDescribedAudio } = require("./narrate");
 const { buildProofCopy, draftAltText, readiness, buildPublicDescription } = require("./copy");
@@ -38,6 +39,7 @@ const semanticCache = new Map();
 const videoMediaCache = new Map();
 const photoSamCache = new Map();
 const videoSamCache = new Map();
+const videoJudgeCache = new Map();
 const audioCache = new Map();
 const describedCache = new Map();
 
@@ -175,16 +177,16 @@ async function measureTake(take, variantId) {
 }
 
 // The measurement a PHOTO take's checks use. An original take's boxes
-// come down the fallback chain (server/sam.js holds the outcome rules):
-// SAM 3.1 when it answers with a subject; the take's recorded facts on
-// a no-match or with calls off; Muse Spark's judgement, reported as
-// judgement, when SAM finds no match and the take has no recorded
-// facts; and a reported failure otherwise. A repaired variant keeps
-// the repair's own computed geometry. On a failure the returned
-// measurement carries quality only — framing and crop need boxes —
-// and the failure field names the reason, so the checks go uncertain
-// with it rather than guessing. Failures are not cached: a later
-// request retries the call.
+// come down the fallback chain in the Nexus's order (server/sam.js
+// holds the outcome rules): SAM 3.1 when it answers with a subject;
+// Muse Spark's judgement, reported as judgement, when SAM answers
+// with no match; the take's recorded facts last, when judgement cannot
+// supply boxes either; and a reported failure otherwise. A repaired
+// variant keeps the repair's own computed geometry. On a failure the
+// returned measurement carries quality only — framing and crop need
+// boxes — and the failure field names the reason, so the checks go
+// uncertain with it rather than guessing. Failures are not cached: a
+// later request retries the call.
 async function photoCheckMeasurement(take, variantId, media) {
   if (variantId) {
     return {
@@ -232,9 +234,9 @@ async function photoCheckMeasurement(take, variantId, media) {
         resolved.kind === "sam"
           ? "Framing and crop safety are measured from boxes located by SAM 3.1."
           : resolved.kind === "judgement"
-            ? "SAM 3.1 was asked for the subject and returned no match in this take, and the take has no recorded facts to measure from, so framing and crop safety are measured from Muse Spark's judgement — an estimate, not a SAM measurement."
+            ? "SAM 3.1 was asked for the subject and returned no match in this take, so framing and crop safety are measured from Muse Spark's judgement — an estimate, not a SAM measurement."
             : resolved.samAnswered
-              ? "SAM 3.1 was asked for the subject and the sign and returned no match in this take, so framing and crop safety are measured from the take's recorded facts."
+              ? `SAM 3.1 was asked for the subject and the sign and returned no match in this take, and Muse Spark's judgement could not supply boxes either (${resolved.judgementMiss ? resolved.judgementMiss.detail : "unavailable"}), so framing and crop safety are measured from the take's recorded facts.`
               : null,
       samFailure: null,
       judgementFailure: null,
@@ -246,11 +248,12 @@ async function photoCheckMeasurement(take, variantId, media) {
 // SAM on a VIDEO take's posted frame. The posted frame is the frame the
 // audience sees, so a subject box SAM locates there can source the
 // framing measurement; crop safety and quality stay with the take's
-// recorded facts. Every other outcome — calls off, a failed call, or
-// SAM returning no match (its answer for ST-V2's drawn frames, verified
-// Oct 29, 2026) — leaves the recorded facts standing and changes no
-// verdict. Returns { framing } when SAM sourced it, { answeredNoMatch:
-// true } when SAM answered with no match, or null otherwise.
+// recorded facts. A no-match answer hands over to the judgement tier
+// (videoJudgementBoxes below); calls off or a failed call leaves the
+// recorded facts standing. Returns { framing } when SAM sourced it,
+// { answeredNoMatch: true } when SAM answered with no match (its
+// answer for ST-V2's drawn frames, verified Oct 29, 2026), or null
+// otherwise.
 async function videoSamFraming(take, variantId, videoMedia) {
   const key = `${take.id}|${variantId || ""}`;
   if (!videoSamCache.has(key)) {
@@ -293,14 +296,67 @@ async function videoSamFraming(take, variantId, videoMedia) {
   return videoSamCache.get(key);
 }
 
+// Muse Spark judgement on a VIDEO take, the tier below SAM in the
+// Nexus's order: when SAM answers with no match on the posted frame,
+// Spark estimates the boxes — on the posted frame for framing (the
+// frame the audience sees), and on the recorded frame for crop safety
+// (a property of what was recorded, with the take's banner in the
+// sign's protective slot). Each frame's estimate stands or falls on
+// its own; a frame whose estimate cannot be had keeps the take's
+// recorded facts for its check. Returns { framing, cropSafety } with
+// either entry null when its estimate was unavailable, or null when
+// neither estimate could be had.
+async function videoJudgementBoxes(take, variantId, videoMedia) {
+  const key = `${take.id}|${variantId || ""}`;
+  if (!videoJudgeCache.has(key)) {
+    let framing = null;
+    let cropSafety = null;
+    try {
+      const post = await estimateBoxes(videoMedia.postedBuffer, take.intent);
+      if (post && post.status === "ok") {
+        const pm = await measureImage(videoMedia.postedBuffer, {
+          subject: post.subject,
+          sign: post.sign,
+        });
+        if (pm.framing) {
+          framing = {
+            subjectTouchesEdges: pm.framing.subjectTouchesEdges,
+            verdict: pm.framing.verdict,
+            detail: pm.framing.subjectTouchesEdges.length
+              ? `In the post as it will be shown, the subject reaches the ${pm.framing.subjectTouchesEdges.join(" and ")} edge of the frame.`
+              : "In the post as it will be shown, the subject sits inside the frame with margin on every side.",
+          };
+        }
+      }
+    } catch {
+      // Judgement unavailable for the posted frame: recorded facts stand.
+    }
+    try {
+      const rec = await estimateBoxes(videoMedia.frameBuffer, take.intent);
+      if (rec && rec.status === "ok") {
+        const rm = await measureImage(
+          videoMedia.frameBuffer,
+          { subject: rec.subject, sign: rec.sign, labels: { sign: "banner" } },
+          videoMedia.sidecar.contentBox || null
+        );
+        if (rm.cropSafety) cropSafety = rm.cropSafety;
+      }
+    } catch {
+      // Judgement unavailable for the recorded frame: recorded facts stand.
+    }
+    videoJudgeCache.set(key, framing || cropSafety ? { framing, cropSafety } : null);
+  }
+  return videoJudgeCache.get(key);
+}
+
 // Builds a take's check list from the real pipelines. Every check carries
 // its source, and no source is a stand-in verdict:
 // - "measured": computed from the take's pixels by measure.js, using the
 //   take's recorded facts (or a repair's computed geometry);
 // - "sam": framing/crop measured from boxes located by SAM 3.1;
 // - "judgement": framing/crop measured from boxes Muse Spark estimated
-//   by judgement — SAM returned no match and the take has no recorded
-//   facts; an estimate, labelled as judgement, never as a SAM measurement;
+//   by judgement — SAM returned no match; an estimate, labelled as
+//   judgement, never as a SAM measurement;
 // - "model": judged by the semantic pipeline (Muse Spark) or, for the
 //   audio check, from a Muse Voice Transcribe transcript;
 // - "determined": settled by the take itself (a still photo has no audio;
@@ -329,6 +385,8 @@ async function buildChecks(take, variantId) {
     if (m) {
       let framing = m.framing;
       let framingSource = "measured";
+      let cropSafety = m.cropSafety;
+      let cropSource = "measured";
       const sam = await videoSamFraming(take, variantId, videoMedia);
       if (sam && sam.framing) {
         framing = sam.framing;
@@ -337,14 +395,34 @@ async function buildChecks(take, variantId) {
         measurementNote =
           "Framing is measured from a subject box SAM 3.1 located on the posted frame; crop safety and quality are measured from the take's recorded facts.";
       } else if (sam && sam.answeredNoMatch) {
-        measurementNote =
-          "SAM 3.1 was asked about the posted frame and returned no match, so framing, crop safety, and quality are measured from the take's recorded facts.";
+        // The next tier in the Nexus's order: Muse Spark judgement.
+        const judged = await videoJudgementBoxes(take, variantId, videoMedia);
+        if (judged && (judged.framing || judged.cropSafety)) {
+          if (judged.framing) {
+            framing = judged.framing;
+            framingSource = "judgement";
+          }
+          if (judged.cropSafety) {
+            cropSafety = judged.cropSafety;
+            cropSource = "judgement";
+          }
+          measurementSource = "judgement";
+          measurementNote =
+            judged.framing && judged.cropSafety
+              ? "SAM 3.1 was asked about the posted frame and returned no match, so framing and crop safety are measured from Muse Spark's judgement — estimates, not SAM measurements. Quality is measured from the take's own pixels."
+              : judged.framing
+                ? "SAM 3.1 was asked about the posted frame and returned no match, so framing is measured from Muse Spark's judgement — an estimate, not a SAM measurement; crop safety and quality are measured from the take's recorded facts."
+                : "SAM 3.1 was asked about the posted frame and returned no match, so crop safety is measured from Muse Spark's judgement — an estimate, not a SAM measurement; framing and quality are measured from the take's recorded facts.";
+        } else {
+          measurementNote =
+            "SAM 3.1 was asked about the posted frame and returned no match, and Muse Spark's judgement could not supply boxes either, so framing, crop safety, and quality are measured from the take's recorded facts.";
+        }
       }
       if (framing) {
         Object.assign(byId.framing, { verdict: framing.verdict, detail: framing.detail, source: framingSource });
       }
-      if (m.cropSafety) {
-        Object.assign(byId.crop, { verdict: m.cropSafety.verdict, detail: m.cropSafety.detail, source: "measured" });
+      if (cropSafety) {
+        Object.assign(byId.crop, { verdict: cropSafety.verdict, detail: cropSafety.detail, source: cropSource });
       }
       Object.assign(byId.quality, { verdict: m.quality.verdict, detail: m.quality.detail, source: "measured" });
     }
@@ -479,7 +557,7 @@ const server = http.createServer((req, res) => {
       modelApiKeyConfigured: Boolean(process.env.MODEL_API_KEY),
       checksMode: "pipelines",
       checksNote:
-        "Framing and crop safety are measured from boxes located by SAM 3.1 when live calls are on; when SAM returns no match in a take, the take's recorded facts stand, and when a take has no recorded facts either, Muse Spark estimates the boxes by judgement and the checks say so — an estimate, never presented as a SAM measurement; a failed SAM call makes those checks uncertain, never guessed. Sharpness and quality are measured from pixels. Text, first impression, and the privacy warning come from the Muse Spark semantic pipeline. A video's speech track is transcribed by Muse Voice Transcribe and the audio check is judged from the transcript; a silent take reports that there is nothing to transcribe, because the silence is part of the take. Model calls run only when the funding switch is on (MODEL_CALLS_ENABLED) — while it is off, model checks report uncertain with the reason, never a guessed verdict.",
+        "Framing and crop safety are measured from boxes located by SAM 3.1 when live calls are on; when SAM returns no match in a take, Muse Spark estimates the boxes by judgement and the checks say so — an estimate, never presented as a SAM measurement; when judgement cannot supply boxes either, the take's recorded facts stand, and a failed SAM call makes those checks uncertain, never guessed. Sharpness and quality are measured from pixels. Text, first impression, and the privacy warning come from the Muse Spark semantic pipeline. A video's speech track is transcribed by Muse Voice Transcribe and the audio check is judged from the transcript; a silent take reports that there is nothing to transcribe, because the silence is part of the take. Model calls run only when the funding switch is on (MODEL_CALLS_ENABLED) — while it is off, model checks report uncertain with the reason, never a guessed verdict.",
     });
   }
 
@@ -652,6 +730,7 @@ const server = http.createServer((req, res) => {
         semanticCache.delete(`${take.id}|${resultVariantId}`);
         videoMediaCache.delete(`${take.id}|${resultVariantId}`);
         videoSamCache.delete(`${take.id}|${resultVariantId}`);
+        videoJudgeCache.delete(`${take.id}|${resultVariantId}`);
         audioCache.delete(`${take.id}|${resultVariantId}`);
         describedCache.delete(`${take.id}|${resultVariantId}`);
         const result = await buildChecks(take, resultVariantId);
