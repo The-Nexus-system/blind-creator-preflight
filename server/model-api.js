@@ -21,8 +21,40 @@
 // Callers handle the disabled error by reporting "uncertain" with the
 // reason, which the design has always allowed. No call is ever retried
 // blindly here; failures surface to the checks as uncertainty, not guesses.
+//
+// Transport pin: MODEL_API_IP_FAMILY (4 or 6) optionally pins outbound
+// calls to one IP address family. Meta's serving is not identical across
+// families from every network: from the Fly deployment's egress, calls
+// over IPv4 return 404 model_not_found for this team's models while the
+// same calls over IPv6 succeed (verified Oct 30, 2026 by forcing each
+// family in turn). The Fly deployment therefore sets the pin to 6. Where
+// the variable is unset, the platform default routing is used unchanged.
 
 const BASE = "https://api.meta.ai/v1";
+
+let cachedDispatcher;
+function transportDispatcher() {
+  if (cachedDispatcher !== undefined) return cachedDispatcher;
+  cachedDispatcher = null;
+  const family = process.env.MODEL_API_IP_FAMILY;
+  if (family === "4" || family === "6") {
+    try {
+      const { Agent } = require("undici");
+      cachedDispatcher = new Agent({
+        connect: { family: Number(family), autoSelectFamily: false },
+      });
+    } catch {
+      // undici unavailable: fall back to default routing rather than fail.
+      cachedDispatcher = null;
+    }
+  }
+  return cachedDispatcher;
+}
+
+function apiFetch(url, init) {
+  const dispatcher = transportDispatcher();
+  return dispatcher ? fetch(url, Object.assign({ dispatcher }, init)) : fetch(url, init);
+}
 
 class ModelCallsDisabled extends Error {
   constructor() {
@@ -48,7 +80,7 @@ function authHeaders(extra) {
 
 async function chatCompletions({ model = "muse-spark-1.3", messages, temperature = 0 }) {
   requireEnabled();
-  const res = await fetch(`${BASE}/chat/completions`, {
+  const res = await apiFetch(`${BASE}/chat/completions`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ model, messages, temperature }),
@@ -67,7 +99,7 @@ async function transcribeFile(buffer, filename = "audio.wav") {
   const form = new FormData();
   form.append("file", new Blob([buffer]), filename);
   form.append("model", "muse-voice-transcribe-1.0");
-  const res = await fetch(`${BASE}/asr/transcribe`, {
+  const res = await apiFetch(`${BASE}/asr/transcribe`, {
     method: "POST",
     headers: authHeaders(),
     body: form,
@@ -126,7 +158,7 @@ async function segmentImage(buffer, concept, width, height) {
     );
   }
   const dataUrl = `data:image/png;base64,${buffer.toString("base64")}`;
-  const res = await fetch(`${BASE}/responses`, {
+  const res = await apiFetch(`${BASE}/responses`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
