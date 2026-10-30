@@ -131,9 +131,27 @@ note: Wonder is the premium-priced tier, which is a product consideration
 outside this measurement; the choice of model for the judgement tier is the
 Nexus System's decision.
 
-The remaining family members — Muse Spark 1.3-contributor, 1.2,
-1.2-contributor, and 1.1 — are being run through the identical harness; this
-section is completed when that arm lands.
+The remaining family members were run through the identical harness
+(Oct 30, 60 calls, 57 trusted replies, no transport errors). On verdicts it
+is a four-way tie: every answered sample from every variant reproduced every
+designed consequence on this media set. The differences are in box quality.
+Muse Spark 1.3-contributor was the cleanest of the four — its sign boxes
+were essentially exact everywhere and its spread the tightest, with one
+distrusted reply in fifteen. Muse Spark 1.2 answered every call and was
+pixel-perfect on ST-P8, but carries a systematic downward bias of about
+28–30 pixels on sign boxes. Muse Spark 1.2-contributor matched that bias
+and produced the run's single worst subject box (one ST-P4 sample with the
+top edge 110 pixels low, verdict unaffected). Muse Spark 1.1, when it
+answered, rivalled the best — and failed to produce a trusted reply in two
+of fifteen calls, the deciding weakness for a fallback tier whose job is to
+answer when SAM cannot. On ST-P8's letter, all four variants in all twelve
+answered samples estimated exactly the recorded box, {700, 800, 950, 950},
+outside the crops: the crop outcome there is estimator-independent, set by
+the letter's true position and by whether the check tests the letter at
+all. The collective lesson of the variants arm: within the Spark family,
+estimator choice moves no verdict on this set — Wonder's edge in the main
+arm (exactness, consistency, no distrusted replies) is the real difference
+on offer.
 
 ## What this adds up to
 
