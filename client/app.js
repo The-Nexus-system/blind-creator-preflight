@@ -15,6 +15,7 @@ const takeListEl = document.getElementById("take-list");
 const resultsEl = document.getElementById("results");
 const repairsEl = document.getElementById("repairs-area");
 const copyAreaEl = document.getElementById("copy-area");
+const shareAreaEl = document.getElementById("share-area");
 const composerStatusEl = document.getElementById("composer-status");
 
 const SOURCE_WORDS = {
@@ -45,11 +46,12 @@ async function loadTakes() {
   takeListEl.replaceChildren();
   for (const take of data.takes) {
     const li = el("li");
-    const button = el("button", `${take.id}: ${take.title} (${take.kind}). Run the pre-flight check.`);
+    li.appendChild(el("p", `${take.id}: ${take.title} (${take.kind}).`));
+    li.appendChild(el("p", `Creator's intent: ${take.intent}`));
+    const button = el("button", `Check ${take.id}`);
     button.type = "button";
     button.addEventListener("click", () => runCheck(take));
     li.appendChild(button);
-    li.appendChild(el("p", `Creator's intent: ${take.intent}`));
     takeListEl.appendChild(li);
   }
 }
@@ -100,6 +102,7 @@ async function runCheck(take) {
   composerStatusEl.textContent = `Checking ${take.id}: ${take.title}.`;
   resultsEl.replaceChildren(el("p", "Running the six checks…"));
   repairsEl.replaceChildren();
+  shareAreaEl.replaceChildren();
   const res = await fetch(`/api/takes/${take.id}/checks`);
   const data = await res.json();
   renderResults(take, data);
@@ -121,7 +124,17 @@ async function loadRepairs(take) {
   const list = el("ul");
   for (const repair of data.repairs) {
     const li = el("li");
-    const button = el("button", repair.name);
+    // Repair names arrive as "Short name: explanation". The button
+    // carries the short name only; the explanation stands before it.
+    const splitAt = repair.name.indexOf(": ");
+    const shortName = splitAt > 0 ? repair.name.slice(0, splitAt) : repair.name;
+    if (splitAt > 0) {
+      const explanation = repair.name.slice(splitAt + 2);
+      li.appendChild(
+        el("p", explanation.charAt(0).toUpperCase() + explanation.slice(1) + (explanation.endsWith(".") ? "" : "."))
+      );
+    }
+    const button = el("button", shortName);
     button.type = "button";
     button.addEventListener("click", () => applyRepair(take, repair));
     li.appendChild(button);
@@ -162,7 +175,10 @@ async function applyRepair(take, repair) {
     );
   }
   repairsEl.appendChild(el("p", "The checks have run again on the repaired take — see the results above."));
-  const undo = el("button", "Undo — return to the original take");
+  repairsEl.appendChild(
+    el("p", "Undoing returns to the original take; the repaired copy is set aside and nothing is kept.")
+  );
+  const undo = el("button", "Undo repair");
   undo.type = "button";
   undo.addEventListener("click", () => runCheck(take));
   repairsEl.appendChild(undo);
@@ -226,14 +242,14 @@ async function loadCopy(take, checkData) {
   editor.rows = 4;
   editor.cols = 60;
   editor.value = data.altText.text;
-  const approveBtn = el("button", "Approve this alt text");
+  const approveBtn = el("button", "Approve alt text");
   approveBtn.type = "button";
   const approveState = el("p", "Not approved yet.");
   editor.addEventListener("input", () => {
     // Any edit un-approves: approval must always cover the current words.
+    // The button label never changes — the state lives in approveState.
     if (session.altTextApproved) {
       session.altTextApproved = false;
-      approveBtn.textContent = "Approve this alt text";
       approveState.textContent = "Edited since approval — approval cleared.";
       refreshReadiness();
     }
@@ -241,7 +257,6 @@ async function loadCopy(take, checkData) {
   frag.appendChild(editor);
   approveBtn.addEventListener("click", () => {
     session.altTextApproved = true;
-    approveBtn.textContent = "Alt text approved";
     approveState.textContent = "You approved the alt text exactly as it stands.";
     refreshReadiness();
   });
@@ -272,6 +287,7 @@ async function loadCopy(take, checkData) {
   copyAreaEl.replaceChildren(frag);
   refreshReadiness();
   loadPublicDescription(take, checkData);
+  renderShareArea(take);
 }
 
 // --- Public description (Tier 2) -------------------------------------------
@@ -305,20 +321,18 @@ async function loadPublicDescription(take, checkData) {
   editor.rows = 4;
   editor.cols = 60;
   editor.value = pd.text;
-  const approveBtn = el("button", "Approve this public description");
+  const approveBtn = el("button", "Approve public description");
   approveBtn.type = "button";
   const approveState = el("p", "Not approved yet. It will not be used anywhere until you approve it.");
   editor.addEventListener("input", () => {
     if (session && session.publicApproved) {
       session.publicApproved = false;
-      approveBtn.textContent = "Approve this public description";
       approveState.textContent = "Edited since approval — approval cleared.";
     }
   });
   frag.appendChild(editor);
   approveBtn.addEventListener("click", () => {
     if (session) session.publicApproved = true;
-    approveBtn.textContent = "Public description approved";
     approveState.textContent = "You approved this description exactly as it stands. It is ready to paste into your post's caption or first comment, or to carry to another platform.";
   });
   frag.appendChild(approveBtn);
@@ -329,6 +343,79 @@ async function loadPublicDescription(take, checkData) {
   download.download = `public-description-${take.id}.txt`;
   frag.appendChild(download);
   publicAreaEl.replaceChildren(frag);
+}
+
+// --- Share -----------------------------------------------------------------
+// The last step of each per-photo flow. The explanation stands before
+// the button, and the button's label is just "Share". Sharing goes
+// through the Web Share API: the current picture as a file when the
+// platform accepts files (navigator.canShare decides), the words
+// alone when it does not. Where this browser has no Web Share API at
+// all there is no button — a plain statement says so instead, so the
+// creator is never handed a control that does nothing.
+
+async function doShare(getParts) {
+  try {
+    const { file, text } = await getParts();
+    let data = text ? { text } : {};
+    if (file && navigator.canShare && navigator.canShare({ files: [file], ...(text ? { text } : {}) })) {
+      data = { files: [file], ...(text ? { text } : {}) };
+    }
+    if (!data.files && !data.text) return;
+    await navigator.share(data);
+  } catch {
+    // The creator cancelled the share sheet, or the share failed;
+    // either way there is nothing they need to hear about it here.
+  }
+}
+
+function renderShareBlock(container, { explanation, noShareText, getParts }) {
+  container.replaceChildren();
+  if (!navigator.share) {
+    container.appendChild(el("p", noShareText));
+    return;
+  }
+  container.appendChild(el("p", explanation));
+  const button = el("button", "Share");
+  button.type = "button";
+  button.addEventListener("click", () => doShare(getParts));
+  container.appendChild(button);
+}
+
+// A seeded take shares its current still: the repaired variant's
+// image when repairs have been applied, otherwise the original (for
+// a video take, its posted frame) — fetched from the read-only media
+// route — with the alt text above as the words: the approved text
+// when it stands approved, the current draft when it does not; both
+// are simply what the editor holds when Share is pressed.
+async function seededShareParts(take) {
+  const editor = document.getElementById("alt-text-editor");
+  const text = editor ? editor.value : `${take.id}: ${take.title}`;
+  let file = null;
+  try {
+    const variantQuery =
+      session && session.variant ? `?variant=${encodeURIComponent(session.variant)}` : "";
+    const res = await fetch(`/api/takes/${take.id}/media${variantQuery}`);
+    if (res.ok) {
+      const blob = await res.blob();
+      file = new File([blob], `${take.id}${session && session.variant ? "-repaired" : ""}.png`, {
+        type: "image/png",
+      });
+    }
+  } catch {
+    file = null;
+  }
+  return { file, text };
+}
+
+function renderShareArea(take) {
+  renderShareBlock(shareAreaEl, {
+    explanation:
+      "Share this take's current picture — the repaired version if you have repaired it, otherwise the original — together with the alt text above, to another app.",
+    noShareText:
+      "This browser cannot share from a web page, so there is no share button here. The proof copy above is ready to copy and paste instead.",
+    getParts: () => seededShareParts(take),
+  });
 }
 
 loadTakes().catch(() => {
@@ -364,7 +451,7 @@ function renderLibrary() {
     el("p", `Your library, swept: ${sweepData.totalItems} items, ${sweepData.totalFiles} files in total.`)
   );
 
-  frag.appendChild(el("h3", "Categories"));
+  frag.appendChild(el("h4", "Categories"));
   const catList = el("ul");
   for (const cat of sweepData.categories) {
     const remaining = cat.itemIds.filter((id) => !culledIds.has(id));
@@ -374,7 +461,7 @@ function renderLibrary() {
     )} files)${remaining.length < cat.itemIds.length ? ` — ${cat.itemIds.length - remaining.length} culled this session` : ""}.`;
     const li = el("li", line);
     if (remaining.length) {
-      const cullBtn = el("button", `Cull the ${cat.name} category`);
+      const cullBtn = el("button", `Cull ${cat.name}`);
       cullBtn.type = "button";
       cullBtn.addEventListener("click", () => {
         armedCullCategory = armedCullCategory === cat.name ? null : cat.name;
@@ -392,7 +479,7 @@ function renderLibrary() {
             : "") +
           "This sweep is simulated: culling here deletes nothing from any real library.";
         li.appendChild(el("p", confirmText));
-        const confirmBtn = el("button", `Confirm culling ${cat.name}`);
+        const confirmBtn = el("button", "Confirm cull");
         confirmBtn.type = "button";
         confirmBtn.addEventListener("click", () => {
           for (const id of remaining) {
@@ -412,11 +499,11 @@ function renderLibrary() {
   // The warning stands alone — never a line inside a category.
   for (const warning of sweepData.privacyWarnings) {
     if (culledIds.has(warning.itemId)) continue;
-    frag.appendChild(el("h3", `Warning — ${warning.itemId}: ${warning.name}`));
+    frag.appendChild(el("h4", `Warning — ${warning.itemId}: ${warning.name}`));
     frag.appendChild(el("p", warning.detail));
   }
 
-  frag.appendChild(el("h3", "Every item, in words"));
+  frag.appendChild(el("h4", "Every item, in words"));
   const itemList = el("ul");
   for (const item of sweepData.items) {
     const state = culledIds.has(item.id)
@@ -432,8 +519,8 @@ function renderLibrary() {
       const toggle = el(
         "button",
         approvedShareIds.has(item.id)
-          ? `Remove ${item.id} from Approved to share`
-          : `Add ${item.id} to Approved to share`
+          ? `Remove ${item.id} from share set`
+          : `Add ${item.id} to share set`
       );
       toggle.type = "button";
       toggle.addEventListener("click", () => {
@@ -443,7 +530,7 @@ function renderLibrary() {
       });
       li.appendChild(toggle);
       if (item.takeId) {
-        const send = el("button", `Run the full pre-flight check on ${item.id}`);
+        const send = el("button", `Check ${item.id}`);
         send.type = "button";
         send.addEventListener("click", () => {
           const take = allTakes.find((t) => t.id === item.takeId);
@@ -493,11 +580,29 @@ loadLibrary().catch(() => {
 // exceed the server's cap, the copy is scaled down further — longest
 // side at most 3000 pixels, then smaller if the limit still requires
 // it — and the server is told, so the result says a scaled copy was
-// checked. The photo is processed for the check and not stored; the
-// results render with textContent only, like every result here.
+// checked. The check opens a working session on the server (the
+// seeded flow at parity: repairs, re-check, proof copy, share) over
+// a copy kept only while the creator works with it; the results
+// render with textContent only, like every result here.
 
 const ownPhotoInput = document.getElementById("own-photo-input");
 const ownPhotoStatusEl = document.getElementById("own-photo-status");
+const ownPhotoResultsEl = document.getElementById("own-photo-results");
+const ownPhotoRepairsEl = document.getElementById("own-photo-repairs");
+const ownPhotoCopyEl = document.getElementById("own-photo-copy");
+const ownPhotoShareEl = document.getElementById("own-photo-share");
+// The working session for the photo most recently checked: its id,
+// the current variant chain (null = the original), and the two
+// approval flags readiness depends on — the seeded flow's session
+// state, for the creator's own photo.
+let ownSession = null;
+// The rendered result list items by check id, so the repairs step
+// can say plainly beside a verdict that no deterministic repair is
+// offered for it.
+let ownCheckItems = {};
+// The latest result summary line, the share text's fallback when no
+// alt text editor stands on the page yet.
+let ownLastSummary = "";
 const UPLOAD_CAP_BYTES = 15 * 1024 * 1024; // the server's cap (server/upload.js)
 const SCALED_LONG_EDGE = 3000;
 const CANVAS_PIXEL_CEILING = 16000000; // safely under iOS Safari's 16,777,216
@@ -575,7 +680,15 @@ async function encodePhotoPng(source, srcW, srcH, targetW, targetH) {
   return canvasPngBlob(canvas);
 }
 
+// --- The own-photo unit ------------------------------------------------------
+// One photo, one unit, in the order a person acts on it — the seeded
+// flow at parity: results, repairs, proof copy and alt text with
+// approval, then share. Each step renders into its own container
+// inside the "Check your own photo" section, exactly as the seeded
+// unit renders into its containers beside the selected take.
+
 function renderUploadResults(data) {
+  ownCheckItems = {};
   const frag = document.createDocumentFragment();
   frag.appendChild(el("h3", "Your photo — pre-flight results"));
   frag.appendChild(el("p", data.note));
@@ -584,7 +697,9 @@ function renderUploadResults(data) {
   const list = el("ul");
   for (const check of data.checks) {
     const sourceWord = SOURCE_WORDS[check.source] || check.source;
-    list.appendChild(el("li", `${check.name}: ${check.verdict} (${sourceWord}) — ${check.detail}`));
+    const li = el("li", `${check.name}: ${check.verdict} (${sourceWord}) — ${check.detail}`);
+    ownCheckItems[check.id] = li;
+    list.appendChild(li);
   }
   frag.appendChild(list);
 
@@ -600,33 +715,283 @@ function renderUploadResults(data) {
 
   const fixes = data.checks.filter((c) => c.verdict === "fix").length;
   const uncertains = data.checks.filter((c) => c.verdict === "uncertain").length;
-  const summary = data.privacyWarning
+  ownLastSummary = data.privacyWarning
     ? "Not ready to post: a private-information warning needs your decision first."
     : fixes > 0
       ? `Not ready to post yet: ${fixes} check${fixes === 1 ? "" : "s"} to fix.`
       : uncertains > 0
         ? "Some checks could not be settled for this photo — each one says why above."
         : "Ready to post: every check passes.";
-  frag.appendChild(el("p", summary));
-  composerStatusEl.textContent = summary;
-  resultsEl.replaceChildren(frag);
+  frag.appendChild(el("p", ownLastSummary));
+  ownPhotoResultsEl.replaceChildren(frag);
+}
+
+// The full unit for the session's current version: results first,
+// then the repairs offered for them, then the copy step (which ends
+// by rendering the share step, as the seeded loadCopy does).
+async function renderOwnUnit(result) {
+  renderUploadResults(result);
+  await loadOwnRepairs(result);
+  await loadOwnCopy(result);
+}
+
+async function loadOwnRepairs(result) {
+  if (!ownSession) return;
+  ownPhotoRepairsEl.replaceChildren(el("p", "Looking for repairs for these verdicts…"));
+  const variantQuery = ownSession.variant
+    ? `?variant=${encodeURIComponent(ownSession.variant)}`
+    : "";
+  const res = await fetch(`/api/uploads/${ownSession.sessionId}/repairs${variantQuery}`);
+  const data = await res.json();
+  ownPhotoRepairsEl.replaceChildren();
+  if (data.error) {
+    ownPhotoRepairsEl.appendChild(el("p", `The repairs could not be listed: ${data.error}`));
+    return;
+  }
+  const offeredFor = new Set((data.repairs || []).map((r) => r.fixesCheck));
+  for (const check of result.checks) {
+    if (check.verdict === "fix" && !offeredFor.has(check.id) && ownCheckItems[check.id]) {
+      ownCheckItems[check.id].textContent += " No deterministic repair is offered for this check.";
+    }
+  }
+  if (!data.repairs || data.repairs.length === 0) {
+    ownPhotoRepairsEl.appendChild(el("p", "No deterministic repairs are offered for this photo's current verdicts."));
+    return;
+  }
+  ownPhotoRepairsEl.appendChild(el("p", "Repairs are performed on the working copy — your original file on this device is never touched, and you can undo at any time. The working copy itself is deleted within two hours."));
+  const list = el("ul");
+  for (const repair of data.repairs) {
+    const li = el("li");
+    // Repair names arrive as "Short name: explanation". The button
+    // carries the short name only; the explanation stands before it.
+    const splitAt = repair.name.indexOf(": ");
+    const shortName = splitAt > 0 ? repair.name.slice(0, splitAt) : repair.name;
+    if (splitAt > 0) {
+      const explanation = repair.name.slice(splitAt + 2);
+      li.appendChild(
+        el("p", explanation.charAt(0).toUpperCase() + explanation.slice(1) + (explanation.endsWith(".") ? "" : "."))
+      );
+    }
+    const button = el("button", shortName);
+    button.type = "button";
+    button.addEventListener("click", () => applyOwnRepair(repair));
+    li.appendChild(button);
+    list.appendChild(li);
+  }
+  ownPhotoRepairsEl.appendChild(list);
+}
+
+async function applyOwnRepair(repair) {
+  if (!ownSession) return;
+  ownPhotoRepairsEl.replaceChildren(el("p", `Performing the repair: ${repair.name}…`));
+  const res = await fetch(`/api/uploads/${ownSession.sessionId}/repair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repairId: repair.id, baseVariant: ownSession.variant }),
+  });
+  const data = await res.json();
+  if (data.error) {
+    ownPhotoRepairsEl.replaceChildren(el("p", `The repair could not be performed: ${data.error}`));
+    return;
+  }
+  ownSession.variant = data.variantId;
+  ownSession.warningAcknowledged = false;
+  ownSession.altTextApproved = false;
+
+  ownPhotoRepairsEl.replaceChildren();
+  ownPhotoRepairsEl.appendChild(el("h3", "What changed"));
+  const changes = el("ul");
+  for (const change of data.changes) changes.appendChild(el("li", change));
+  ownPhotoRepairsEl.appendChild(changes);
+  if (data.outcome) {
+    ownPhotoRepairsEl.appendChild(
+      el(
+        "p",
+        data.outcome.worse
+          ? `Measured outcome: ${data.outcome.checkName} went from ${data.outcome.before} to ${data.outcome.after} — the repair did not improve this photo, and undo is right there.`
+          : `Measured outcome: ${data.outcome.checkName} went from ${data.outcome.before} to ${data.outcome.after}.`
+      )
+    );
+  }
+  ownPhotoRepairsEl.appendChild(el("p", "The checks have run again on the repaired photo — see the results above."));
+  ownPhotoRepairsEl.appendChild(
+    el("p", "Undoing returns to your photo as it arrived; the repaired working copy is set aside.")
+  );
+  const undo = el("button", "Undo repair");
+  undo.type = "button";
+  undo.addEventListener("click", undoOwnRepair);
+  ownPhotoRepairsEl.appendChild(undo);
+
+  renderUploadResults(data.result);
+  loadOwnCopy(data.result);
+}
+
+async function undoOwnRepair() {
+  if (!ownSession) return;
+  ownSession.variant = null;
+  ownSession.warningAcknowledged = false;
+  ownSession.altTextApproved = false;
+  const res = await fetch(`/api/uploads/${ownSession.sessionId}/checks`);
+  const data = await res.json();
+  if (data.error) {
+    ownPhotoRepairsEl.replaceChildren(el("p", `The original could not be re-checked: ${data.error}`));
+    return;
+  }
+  renderOwnUnit(data);
+}
+
+async function refreshOwnReadiness() {
+  if (!ownSession) return;
+  const res = await fetch(`/api/uploads/${ownSession.sessionId}/readiness`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      variant: ownSession.variant,
+      warningAcknowledged: ownSession.warningAcknowledged,
+      altTextApproved: ownSession.altTextApproved,
+    }),
+  });
+  const r = await res.json();
+  const region = document.getElementById("own-readiness-region");
+  if (!region) return;
+  region.replaceChildren();
+  region.appendChild(el("h3", "Ready to post"));
+  if (r.ready) {
+    region.appendChild(el("p", "Ready. Every check is settled, and you have approved the words."));
+  } else {
+    region.appendChild(el("p", "Not ready yet:"));
+    const list = el("ul");
+    for (const reason of r.reasons || []) list.appendChild(el("li", reason));
+    region.appendChild(list);
+  }
+}
+
+async function loadOwnCopy(checkData) {
+  if (!ownSession) return;
+  ownPhotoCopyEl.replaceChildren(el("p", "Building your proof copy and alt text draft…"));
+  const variantQuery = checkData.variant ? `?variant=${encodeURIComponent(checkData.variant)}` : "";
+  const res = await fetch(`/api/uploads/${ownSession.sessionId}/copy${variantQuery}`);
+  const data = await res.json();
+  if (data.error) {
+    ownPhotoCopyEl.replaceChildren(el("p", `The proof copy could not be built: ${data.error}`));
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  frag.appendChild(el("h3", "Proof copy — yours alone, never posted"));
+  const pre = el("pre");
+  pre.textContent = data.proofCopy;
+  frag.appendChild(pre);
+  const blob = new Blob([data.proofCopy], { type: "text/plain; charset=utf-8" });
+  const download = el("a", "Download the proof copy as a plain text file (braille-ready).");
+  download.href = URL.createObjectURL(blob);
+  download.download = `proof-copy-your-photo${checkData.variant ? "-repaired" : ""}.txt`;
+  frag.appendChild(download);
+
+  frag.appendChild(el("h3", "Alt text for the post"));
+  frag.appendChild(el("p", data.altText.note));
+  const label = el("label", "Alt text — edit it into your own words:");
+  label.htmlFor = "own-alt-text-editor";
+  frag.appendChild(label);
+  const editor = document.createElement("textarea");
+  editor.id = "own-alt-text-editor";
+  editor.rows = 4;
+  editor.cols = 60;
+  editor.value = data.altText.text;
+  const approveBtn = el("button", "Approve alt text");
+  approveBtn.type = "button";
+  const approveState = el("p", "Not approved yet.");
+  editor.addEventListener("input", () => {
+    // Any edit un-approves: approval must always cover the current words.
+    // The button label never changes — the state lives in approveState.
+    if (ownSession.altTextApproved) {
+      ownSession.altTextApproved = false;
+      approveState.textContent = "Edited since approval — approval cleared.";
+      refreshOwnReadiness();
+    }
+  });
+  frag.appendChild(editor);
+  approveBtn.addEventListener("click", () => {
+    ownSession.altTextApproved = true;
+    approveState.textContent = "You approved the alt text exactly as it stands.";
+    refreshOwnReadiness();
+  });
+  frag.appendChild(approveBtn);
+  frag.appendChild(approveState);
+
+  if (checkData.privacyWarning) {
+    frag.appendChild(el("h3", "Before this can be ready — the warning"));
+    const ackLabel = el(
+      "label",
+      `I understand this warning and what posting would make public: ${checkData.privacyWarning.name}`
+    );
+    const ack = document.createElement("input");
+    ack.type = "checkbox";
+    ack.addEventListener("change", () => {
+      ownSession.warningAcknowledged = ack.checked;
+      refreshOwnReadiness();
+    });
+    ackLabel.prepend(ack);
+    frag.appendChild(ackLabel);
+  }
+
+  const region = el("div");
+  region.id = "own-readiness-region";
+  region.setAttribute("aria-live", "polite");
+  frag.appendChild(region);
+
+  ownPhotoCopyEl.replaceChildren(frag);
+  refreshOwnReadiness();
+  renderOwnShare();
+}
+
+// An uploaded photo shares its current version — the repaired
+// variant when repairs have been applied, otherwise the photo as it
+// arrived — fetched from the session's read-only media route, with
+// the alt text above as the words: the approved text when it stands
+// approved, the current draft when it does not; both are simply what
+// the editor holds when Share is pressed.
+async function ownShareParts() {
+  const editor = document.getElementById("own-alt-text-editor");
+  const text = editor ? editor.value : ownLastSummary;
+  let file = null;
+  try {
+    const variantQuery = ownSession.variant
+      ? `?variant=${encodeURIComponent(ownSession.variant)}`
+      : "";
+    const res = await fetch(`/api/uploads/${ownSession.sessionId}/media${variantQuery}`);
+    if (res.ok) {
+      const blob = await res.blob();
+      file = new File([blob], `your-photo${ownSession.variant ? "-repaired" : ""}.png`, {
+        type: "image/png",
+      });
+    }
+  } catch {
+    file = null;
+  }
+  return { file, text };
+}
+
+function renderOwnShare() {
+  renderShareBlock(ownPhotoShareEl, {
+    explanation:
+      "Share your photo — the repaired version if you have repaired it, otherwise the photo as it arrived — together with the alt text above, to another app.",
+    noShareText:
+      "This browser cannot share from a web page, so there is no share button here. The proof copy above is ready to copy and paste instead.",
+    getParts: () => ownShareParts(),
+  });
 }
 
 async function checkOwnPhoto() {
   const file = ownPhotoInput.files && ownPhotoInput.files[0];
   if (!file) return;
   session = null;
+  ownSession = null;
+  ownPhotoRepairsEl.replaceChildren();
+  ownPhotoCopyEl.replaceChildren();
+  ownPhotoShareEl.replaceChildren();
   ownPhotoStatusEl.textContent = "Reading your photo…";
-  resultsEl.replaceChildren(el("p", "Running the six checks on your photo…"));
-  repairsEl.replaceChildren(
-    el("p", "Repairs belong to the seeded takes; a photo of your own gets the checks themselves.")
-  );
-  copyAreaEl.replaceChildren(
-    el("p", "Proof copy and alt text belong to the seeded takes in this demo; a photo of your own gets the checks themselves.")
-  );
-  publicAreaEl.replaceChildren(
-    el("p", "The public description belongs to the seeded takes in this demo.")
-  );
+  ownPhotoResultsEl.replaceChildren(el("p", "Running the six checks on your photo…"));
   let decoded = null;
   try {
     decoded = await decodePhoto(file);
@@ -658,7 +1023,7 @@ async function checkOwnPhoto() {
     }
     if (blob.size > UPLOAD_CAP_BYTES) {
       ownPhotoStatusEl.textContent = "That photo is still too large to check even after scaling down. Nothing was sent.";
-      resultsEl.replaceChildren(el("p", "The photo was not checked: even a scaled copy exceeds the 15 MB limit."));
+      ownPhotoResultsEl.replaceChildren(el("p", "The photo was not checked: even a scaled copy exceeds the 15 MB limit."));
       return;
     }
 
@@ -673,16 +1038,22 @@ async function checkOwnPhoto() {
     const data = await res.json();
     if (data.error) {
       ownPhotoStatusEl.textContent = `The check could not run: ${data.error}`;
-      resultsEl.replaceChildren(el("p", `The photo was not checked: ${data.error}`));
+      ownPhotoResultsEl.replaceChildren(el("p", `The photo was not checked: ${data.error}`));
       return;
     }
     ownPhotoStatusEl.textContent =
-      "Your photo has been checked. The results are in the results section; the photo itself was not stored.";
-    renderUploadResults(data);
+      "Your photo has been checked. The results are just below, in this section, with any repairs, the proof copy, and the share step after them. The working copy is kept only while you work with it and is deleted within two hours.";
+    ownSession = {
+      sessionId: data.sessionId,
+      variant: null,
+      warningAcknowledged: false,
+      altTextApproved: false,
+    };
+    renderOwnUnit(data);
   } catch (err) {
     ownPhotoStatusEl.textContent =
       "That photo could not be read in this browser, so it was not checked. A JPEG or PNG copy of it will work.";
-    resultsEl.replaceChildren(
+    ownPhotoResultsEl.replaceChildren(
       el("p", "The photo was not checked: this browser could not decode it.")
     );
   } finally {

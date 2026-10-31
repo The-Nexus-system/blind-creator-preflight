@@ -12,11 +12,13 @@
 // framing, crop safety, and quality; the judgement tier (Muse Wonder,
 // falling back to Muse Spark 1.3-contributor) for text, first
 // impression, and the private-information warning; Muse Voice
-// Transcribe for the audio check. A visitor can also check a photo of
-// their own (POST /api/uploads/check, server/upload.js): the photo is
-// processed for the check and deleted, never stored, and — having no
-// recorded facts — its framing and crop read uncertain when no tier
-// can locate the subject. Live model calls are gated on the
+// Transcribe for the audio check. A visitor can also run the whole
+// flow on a photo of their own (POST /api/uploads/check,
+// server/upload.js): the upload opens a working session — check,
+// repairs, proof copy, share — over a copy the server keeps only
+// while the creator works with it (deleted within two hours), and —
+// having no recorded facts — its framing and crop read uncertain when
+// no tier can locate the subject. Live model calls are gated on the
 // funding switch (MODEL_CALLS_ENABLED in model-api.js): while it is
 // off, the model checks report "uncertain" with the reason, never a
 // guessed verdict, and the measured checks run from the takes'
@@ -33,7 +35,7 @@ const { locateBoxes, resolvePhotoBoxes } = require("./sam");
 const { estimateBoxes } = require("./judge");
 const { runAudioCheck } = require("./audio");
 const { buildDescribedAudio } = require("./narrate");
-const { handleUploadCheck } = require("./upload");
+const { handleUploadRoutes } = require("./upload");
 const { buildProofCopy, draftAltText, readiness, buildPublicDescription } = require("./copy");
 const { availableRepairs, applyRepair, applyTransform, composeTransforms } = require("./repair");
 const { sweep } = require("./library");
@@ -872,13 +874,53 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Check your own photo: one PNG per request in the raw body, under a
-  // hard size cap enforced while reading; the photo is processed for
-  // the check and deleted, never stored (server/upload.js).
-  if (url.pathname === "/api/uploads/check" && req.method === "POST") {
-    handleUploadCheck(req, res, {
-      scaled: url.searchParams.get("scaled") === "1",
-    }).catch((err) => sendJson(res, 500, { error: `The check failed: ${err.message}` }));
+  // Read-only take media for the Share action: the take's current
+  // still image — the repaired variant's when a variant is named, the
+  // original otherwise; for a video take, its posted frame. Path
+  // safety is strict by construction: the take id must be one of the
+  // seeded takes, and every element of the variant chain must be one
+  // of the known repair ids — no client-supplied value reaches a file
+  // path except through those allowlists, and the resolved path is
+  // confirmed inside the media directory before it is read.
+  const mediaMatch = url.pathname.match(/^\/api\/takes\/([A-Za-z0-9-]+)\/media$/);
+  if (mediaMatch && req.method === "GET") {
+    const take = TAKES.find((t) => t.id === mediaMatch[1]);
+    if (!take) return sendJson(res, 404, { error: "Unknown take id." });
+    const variantId = url.searchParams.get("variant") || undefined;
+    const REPAIR_IDS = ["reframe-margin", "reframe-fit-crops", "brightness-auto", COVER_REPAIR_ID];
+    if (variantId && !chainOf(variantId).every((id) => REPAIR_IDS.includes(id))) {
+      return sendJson(res, 400, { error: "Unknown variant." });
+    }
+    let filePath;
+    if (take.kind === "video") {
+      filePath = !variantId
+        ? path.join(MEDIA_DIR, `${take.id}-posted.png`)
+        : variantId === COVER_REPAIR_ID
+          ? path.join(MEDIA_DIR, `${take.id}-cover-posted.png`)
+          : path.join(REPAIRED_DIR, `${take.id}--${variantId}.png`);
+    } else {
+      filePath = variantId
+        ? path.join(REPAIRED_DIR, `${take.id}--${variantId}.png`)
+        : path.join(MEDIA_DIR, `${take.id}.png`);
+    }
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(path.resolve(MEDIA_DIR))) {
+      return sendJson(res, 400, { error: "Unknown variant." });
+    }
+    if (!fs.existsSync(resolved)) {
+      return sendJson(res, 404, { error: "This take has no image to share." });
+    }
+    res.writeHead(200, { "Content-Type": "image/png" });
+    return res.end(fs.readFileSync(resolved));
+  }
+
+  // Check your own photo and its working session (server/upload.js):
+  // the check itself plus the session surface — checks, repairs,
+  // repair, copy, readiness, media — all scoped to the one session.
+  if (url.pathname.startsWith("/api/uploads/")) {
+    handleUploadRoutes(req, res, url, {}).catch((err) =>
+      sendJson(res, 500, { error: `The upload request failed: ${err.message}` })
+    );
     return;
   }
 

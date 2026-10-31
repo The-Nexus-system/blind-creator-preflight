@@ -13,14 +13,9 @@
 </header>
 
 <main>
-  <section aria-labelledby="composer-heading">
-    <h2 id="composer-heading">Composer (simulated)</h2>
-    <p id="composer-status">No take chosen yet. Pick one of the seeded takes below to run its pre-flight check.</p>
-  </section>
-
   <section aria-labelledby="own-photo-heading">
     <h2 id="own-photo-heading">Check your own photo</h2>
-    <p>Pick a photo of your own and the same six checks run on it, live. Your browser converts the photo you choose to PNG and sends it to be checked; the photo is processed for the check and not stored — it is deleted as soon as the check finishes. A photo of your own has no recorded facts and no stated intent, so where its subject cannot be located, framing and crop safety will say uncertain and say why.</p>
+    <p>Pick a photo of your own and the same six checks run on it, live. Your browser converts the photo you choose to PNG and sends it to be checked; Pre-Flight keeps a working copy of it on the server while you check, repair, and share it, and that copy is deleted within two hours. A photo of your own has no recorded facts and no stated intent, so where its subject cannot be located, framing and crop safety will say uncertain and say why.</p>
     <p>
       <label for="own-photo-input">Choose a photo to check:</label>
       <!-- Image-only on purpose: do not widen this accept to video/* —
@@ -30,47 +25,53 @@
     </p>
     <p id="own-photo-hint">Any photo your browser can open works — HEIC, JPEG, or PNG; it is converted to PNG in the browser before it is sent. Photos over the 15 MB limit are scaled down first.</p>
     <output id="own-photo-status" role="status">No photo chosen yet.</output>
+    <div id="own-photo-results"></div>
+    <div id="own-photo-repairs"></div>
+    <div id="own-photo-copy"></div>
+    <div id="own-photo-share"></div>
   </section>
 
-  <section aria-labelledby="takes-heading">
-    <h2 id="takes-heading">Seeded takes</h2>
-    <p>These are written example takes with known states — clean, or carrying one named flaw — so the checks can be demonstrated and tested.</p>
-    <ul id="take-list"></ul>
-  </section>
+  <section aria-labelledby="seed-demo-heading">
+    <h2 id="seed-demo-heading">Seeded demo — example takes and their checks</h2>
+    <p>Everything in this region is seeded example material with known states, present to demonstrate and test the checks.</p>
 
-  <section aria-labelledby="results-heading">
-    <h2 id="results-heading">Pre-Flight results</h2>
-    <div id="results" aria-live="polite">
-      <p>No results yet.</p>
+    <section aria-labelledby="composer-heading">
+      <h3 id="composer-heading">Composer (simulated)</h3>
+      <p id="composer-status">No take chosen yet. Pick one of the seeded takes below to run its pre-flight check.</p>
+    </section>
+
+    <section aria-labelledby="takes-heading">
+      <h3 id="takes-heading">Seeded takes</h3>
+      <p>These are written example takes with known states — clean, or carrying one named flaw — so the checks can be demonstrated and tested.</p>
+      <ul id="take-list"></ul>
+    </section>
+
+    <div id="take-unit">
+      <div id="results" aria-live="polite">
+        <p>No results yet.</p>
+      </div>
+
+      <div id="repairs-area">
+        <p>Run a check first. If a check says fix, the deterministic repairs for it appear here.</p>
+      </div>
+
+      <div id="copy-area">
+        <p>Run a check first. The proof copy and the alt text draft are built from its results.</p>
+      </div>
+
+      <div id="public-area">
+        <p>Run a check first. The public description is built from the same verified facts as the proof copy, written for the people who will see your post.</p>
+      </div>
+
+      <div id="share-area"></div>
     </div>
-  </section>
 
-  <section aria-labelledby="repairs-heading">
-    <h2 id="repairs-heading">Repairs</h2>
-    <div id="repairs-area">
-      <p>Run a check first. If a check says fix, the deterministic repairs for it appear here.</p>
-    </div>
-  </section>
-
-  <section aria-labelledby="copy-heading">
-    <h2 id="copy-heading">Proof copy, alt text, and approval</h2>
-    <div id="copy-area">
-      <p>Run a check first. The proof copy and the alt text draft are built from its results.</p>
-    </div>
-  </section>
-
-  <section aria-labelledby="public-heading">
-    <h2 id="public-heading">Public description — for your audience (optional)</h2>
-    <div id="public-area">
-      <p>Run a check first. The public description is built from the same verified facts as the proof copy, written for the people who will see your post.</p>
-    </div>
-  </section>
-
-  <section aria-labelledby="library-heading">
-    <h2 id="library-heading">Library Sweep — know what is in your library before any app sees it</h2>
-    <div id="library-area">
-      <p>Loading the sweep…</p>
-    </div>
+    <section aria-labelledby="library-heading">
+      <h3 id="library-heading">Library Sweep — know what is in your library before any app sees it</h3>
+      <div id="library-area">
+        <p>Loading the sweep…</p>
+      </div>
+    </section>
   </section>
 </main>
 

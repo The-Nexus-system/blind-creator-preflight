@@ -25,6 +25,11 @@ h2 {
   margin-top: 2rem;
 }
 
+h3 {
+  font-size: 1.1rem;
+  margin-top: 1.75rem;
+}
+
 button {
   font: inherit;
   padding: 0.55rem 0.9rem;

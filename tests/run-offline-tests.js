@@ -712,14 +712,19 @@ const { sweep } = require("../server/library");
   }
 
   // 16. Check your own photo (Nexus ruling, Xander, Oct 31, 2026): the
-  // upload pipeline. A supplied photo has no recorded facts and no
-  // stated intent, so the box chain ends at SAM or the judgement tier —
-  // or at honest uncertainty, never a pass and never a "recorded"
-  // source. The HTTP cases run the real handler on an ephemeral port
-  // with stubbed model pieces: no network, no spend.
+  // upload pipeline and its working session. A supplied photo has no
+  // recorded facts and no stated intent, so the box chain ends at SAM
+  // or the judgement tier — or at honest uncertainty, never a pass and
+  // never a "recorded" source. The check opens a session (the seeded
+  // flow at parity: repairs, re-check, copy) over a working copy that
+  // lives at most two hours. The HTTP cases run the real handlers on
+  // an ephemeral port with stubbed model pieces: no network, no spend.
   const {
     buildUploadChecks,
     handleUploadCheck,
+    handleUploadRoutes,
+    sessionMediaPath,
+    sweepUploadSessions,
     UPLOAD_TMP_DIR,
     MAX_UPLOAD_BYTES,
   } = require("../server/upload");
@@ -727,7 +732,7 @@ const { sweep } = require("../server/library");
   // Start from a clean temp dir so leftovers can be asserted exactly.
   fs.mkdirSync(UPLOAD_TMP_DIR, { recursive: true });
   for (const f of fs.readdirSync(UPLOAD_TMP_DIR)) {
-    fs.unlinkSync(path.join(UPLOAD_TMP_DIR, f));
+    fs.rmSync(path.join(UPLOAD_TMP_DIR, f), { recursive: true, force: true });
   }
   const uploadSeg = async (buf, concept) =>
     concept === "person"
@@ -780,8 +785,9 @@ const { sweep } = require("../server/library");
   ok("upload (d): no tier can locate the subject → framing/crop uncertain, never a pass");
 
   const uploadHttp = http.createServer((req, res) => {
-    if (req.url.startsWith("/api/uploads/check")) {
-      handleUploadCheck(req, res, { segmenter: uploadSeg, chat: uploadChat }).catch((err) => {
+    const url = new URL(req.url, "http://localhost");
+    if (url.pathname.startsWith("/api/uploads/")) {
+      handleUploadRoutes(req, res, url, { segmenter: uploadSeg, chat: uploadChat }).catch((err) => {
         res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ error: err.message }));
       });
@@ -793,7 +799,8 @@ const { sweep } = require("../server/library");
   await new Promise((resolve) => uploadHttp.listen(0, "127.0.0.1", resolve));
   const upBase = `http://127.0.0.1:${uploadHttp.address().port}`;
   try {
-    // (e) A completed request deletes its temp file.
+    // (e) A completed request opens exactly one session — its own —
+    // and keeps the original inside it for the flow that follows.
     const okRes = await fetch(`${upBase}/api/uploads/check`, {
       method: "POST",
       headers: { "Content-Type": "image/png" },
@@ -803,12 +810,19 @@ const { sweep } = require("../server/library");
     const okBody = await okRes.json();
     assert.strictEqual(okBody.origin, "upload");
     assert.strictEqual(okBody.measurementSource, "sam");
+    assert.match(okBody.sessionId, /^[a-f0-9]{32}$/, "the check answers with its session id");
     assert.deepStrictEqual(
       fs.readdirSync(UPLOAD_TMP_DIR),
-      [],
-      "the temp file is deleted when the request finishes"
+      [okBody.sessionId],
+      "the temp dir holds exactly the new session"
     );
-    ok("upload (e): a completed request leaves the temp dir empty");
+    assert(
+      fs.readdirSync(path.join(UPLOAD_TMP_DIR, okBody.sessionId)).includes("original.png"),
+      "the session keeps the original photo"
+    );
+    fs.rmSync(path.join(UPLOAD_TMP_DIR, okBody.sessionId), { recursive: true, force: true });
+    assert.deepStrictEqual(fs.readdirSync(UPLOAD_TMP_DIR), [], "cleanup leaves the temp dir empty");
+    ok("upload (e): a completed request creates exactly its own session and keeps the original");
 
     // (c) A non-PNG body is rejected before any file exists.
     const badRes = await fetch(`${upBase}/api/uploads/check`, {
@@ -838,6 +852,150 @@ const { sweep } = require("../server/library");
     ok("upload (b): an over-cap body is rejected at the cap, no file left behind");
   } finally {
     uploadHttp.close();
+  }
+
+  // 17. The upload session flow, end to end over HTTP with stubs: a
+  // photo whose sign runs off the crop (the ST-P4 shape) must be
+  // offered the fit-crops reframe; applying it must re-check and
+  // report the measured outcome; the copy endpoint must answer from
+  // the session's own results. The stub segmenter plays a segmenter
+  // that sees what it is given: the original bytes get the wide,
+  // crop-cutting boxes; any other bytes (the repaired picture) get
+  // the fitted boxes a real segmenter would find in it.
+  const p4Seg = async (buf, concept) => {
+    const original = buf.equals(p1buf);
+    if (concept === "person") return [original ? { x0: 350, y0: 200, x1: 650, y1: 800 } : { x0: 350, y0: 275, x1: 650, y1: 725 }];
+    return [original ? { x0: 250, y0: 600, x1: 1000, y1: 700 } : { x0: 300, y0: 620, x1: 700, y1: 700 }];
+  };
+  const sessionHttp = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    if (url.pathname.startsWith("/api/uploads/")) {
+      handleUploadRoutes(req, res, url, { segmenter: p4Seg, chat: uploadChat }).catch((err) => {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: err.message }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((resolve) => sessionHttp.listen(0, "127.0.0.1", resolve));
+  const sBase = `http://127.0.0.1:${sessionHttp.address().port}`;
+  try {
+    const checkRes = await fetch(`${sBase}/api/uploads/check`, {
+      method: "POST",
+      headers: { "Content-Type": "image/png" },
+      body: p1buf,
+    });
+    assert.strictEqual(checkRes.status, 200);
+    const checkBody = await checkRes.json();
+    const sid = checkBody.sessionId;
+    assert.match(sid, /^[a-f0-9]{32}$/);
+    assert.strictEqual(checkBody.checks.find((c) => c.id === "crop").verdict, "fix", "the wide sign reads crop fix");
+
+    const repairsRes = await fetch(`${sBase}/api/uploads/${sid}/repairs`);
+    assert.strictEqual(repairsRes.status, 200);
+    const repairsBody = await repairsRes.json();
+    assert(
+      repairsBody.repairs.some((r) => r.id === "reframe-fit-crops"),
+      "the crop fix offers the fit-crops reframe"
+    );
+    ok("upload session: creation, and the crop fix offers its reframe repair");
+
+    const applyRes = await fetch(`${sBase}/api/uploads/${sid}/repair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repairId: "reframe-fit-crops" }),
+    });
+    assert.strictEqual(applyRes.status, 200);
+    const applyBody = await applyRes.json();
+    assert.strictEqual(applyBody.variantId, "reframe-fit-crops");
+    assert(applyBody.changes.length >= 2, "the repair reports what changed");
+    assert.strictEqual(applyBody.outcome.checkId, "crop");
+    assert.strictEqual(applyBody.outcome.before, "fix");
+    assert.strictEqual(applyBody.outcome.after, "pass", "the re-check measures the repaired picture and the crop passes");
+    assert.strictEqual(applyBody.outcome.improved, true);
+    assert.strictEqual(applyBody.result.variant, "reframe-fit-crops");
+    assert(
+      fs.existsSync(path.join(UPLOAD_TMP_DIR, sid, "reframe-fit-crops.png")),
+      "the repaired variant is a file in the session"
+    );
+    ok("upload session: applying the reframe re-checks and reports the measured outcome");
+
+    const copyRes = await fetch(`${sBase}/api/uploads/${sid}/copy?variant=reframe-fit-crops`);
+    assert.strictEqual(copyRes.status, 200);
+    const copyBody = await copyRes.json();
+    assert(copyBody.proofCopy.includes("Proof copy for your photo"), "the proof copy is the upload's own");
+    assert(copyBody.proofCopy.includes("no recorded facts"), "the proof copy states the missing record plainly");
+    assert(copyBody.altText.text.startsWith("A photo."), "the alt text draft is assembled from the checks");
+    assert.strictEqual(copyBody.altText.source, "assembled");
+    ok("upload session: the copy endpoint builds proof copy and an alt text draft from the session's results");
+
+    const mediaRes = await fetch(`${sBase}/api/uploads/${sid}/media?variant=reframe-fit-crops`);
+    assert.strictEqual(mediaRes.status, 200);
+    assert((mediaRes.headers.get("content-type") || "").includes("image/png"));
+    const mediaBuf = Buffer.from(await mediaRes.arrayBuffer());
+    assert.strictEqual(mediaBuf.subarray(0, 4).toString("hex"), "89504e47", "the media route serves the variant PNG");
+    const origMediaRes = await fetch(`${sBase}/api/uploads/${sid}/media`);
+    assert.strictEqual(origMediaRes.status, 200);
+    ok("upload session: the media route serves the current variant and the original");
+
+    const readyRes = await fetch(`${sBase}/api/uploads/${sid}/readiness`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ variant: "reframe-fit-crops", warningAcknowledged: true, altTextApproved: true }),
+    });
+    assert.strictEqual(readyRes.status, 200);
+    const readyBody = await readyRes.json();
+    assert.strictEqual(typeof readyBody.ready, "boolean");
+    assert(Array.isArray(readyBody.reasons));
+    ok("upload session: readiness answers over the session's own results");
+
+    // Isolation: a second session cannot be served the first
+    // session's repaired file, and traversal shapes are rejected
+    // before any path is built.
+    const check2Res = await fetch(`${sBase}/api/uploads/check`, {
+      method: "POST",
+      headers: { "Content-Type": "image/png" },
+      body: p1buf,
+    });
+    const sid2 = (await check2Res.json()).sessionId;
+    const crossRes = await fetch(`${sBase}/api/uploads/${sid2}/media?variant=reframe-fit-crops`);
+    assert.strictEqual(crossRes.status, 404, "one session cannot address another session's variant");
+    const travRes = await fetch(`${sBase}/api/uploads/${sid}/media?variant=${encodeURIComponent("../../secret")}`);
+    assert.strictEqual(travRes.status, 400, "a traversal-shaped variant chain is rejected");
+    const badSidRes = await fetch(`${sBase}/api/uploads/${encodeURIComponent("../../etc")}/media`);
+    assert.strictEqual(badSidRes.status, 404, "a traversal-shaped session id is rejected");
+    const ghostRes = await fetch(`${sBase}/api/uploads/${"0".repeat(32)}/checks`);
+    assert.strictEqual(ghostRes.status, 404, "a well-formed but unknown session is a 404");
+    assert.strictEqual(sessionMediaPath(sid, "../../secret"), null, "the path resolver refuses traversal chains");
+    assert.strictEqual(sessionMediaPath("../../etc", null), null, "the path resolver refuses traversal session ids");
+    const ownPath = sessionMediaPath(sid, "reframe-fit-crops");
+    assert(ownPath && ownPath.startsWith(path.join(UPLOAD_TMP_DIR, sid)), "a valid path stays inside its session");
+    ok("upload session: isolation — no session can address another's files; traversal shapes are rejected");
+
+    fs.rmSync(path.join(UPLOAD_TMP_DIR, sid), { recursive: true, force: true });
+    fs.rmSync(path.join(UPLOAD_TMP_DIR, sid2), { recursive: true, force: true });
+  } finally {
+    sessionHttp.close();
+  }
+
+  // 18. The age sweep: a session directory older than two hours is
+  // deleted; a fresh one is left alone.
+  {
+    const oldId = "a".repeat(32);
+    const freshId = "b".repeat(32);
+    for (const id of [oldId, freshId]) {
+      fs.mkdirSync(path.join(UPLOAD_TMP_DIR, id), { recursive: true });
+      fs.writeFileSync(path.join(UPLOAD_TMP_DIR, id, "original.png"), p1buf);
+    }
+    const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    fs.utimesSync(path.join(UPLOAD_TMP_DIR, oldId), threeHoursAgo, threeHoursAgo);
+    await sweepUploadSessions(Date.now());
+    assert(!fs.existsSync(path.join(UPLOAD_TMP_DIR, oldId)), "the stale session is swept");
+    assert(fs.existsSync(path.join(UPLOAD_TMP_DIR, freshId)), "the fresh session survives the sweep");
+    fs.rmSync(path.join(UPLOAD_TMP_DIR, freshId), { recursive: true, force: true });
+    ok("upload session: the two-hour sweep deletes stale sessions and keeps fresh ones");
   }
 
   console.log(`\n${passed} test groups passed.`);

@@ -74,6 +74,61 @@ function draftAltText(take, result) {
   };
 }
 
+function buildUploadProofCopy(result) {
+  // The supplied-photo sibling of buildProofCopy: the same deterministic
+  // composition — every claim a check made, with its source attached —
+  // over the upload's own check results. A supplied photo has no take
+  // id, no title, and no stated intent, and the copy says so instead of
+  // borrowing a seeded take's frame.
+  const lines = [];
+  lines.push("Proof copy for your photo — one you supplied for checking.");
+  lines.push(
+    "This photo has no stated intent and no recorded facts: everything below was measured or judged from the photo itself."
+  );
+  lines.push("");
+  lines.push("What the checks found:");
+  for (const c of result.checks) {
+    lines.push(`${c.name}: ${c.verdict}. ${c.detail} (Source: ${c.source}.)`);
+  }
+  if (result.privacyWarning) {
+    lines.push("");
+    lines.push(`Warning. ${result.privacyWarning.name}`);
+    lines.push(result.privacyWarning.detail);
+    lines.push(`(Warning source: ${result.privacyWarningSource}.)`);
+  }
+  lines.push("");
+  lines.push(
+    "This proof copy is yours alone. It is not posted, attached, or shared anywhere."
+  );
+  return lines.join("\n");
+}
+
+function draftUploadAltText(result) {
+  // Assembled draft from the upload's own check results — its semantic
+  // readings, verdicts, and measured facts. There is no intent to lead
+  // with and no recorded facts to draw on, so the draft is built only
+  // from what the checks found, and the note says exactly that.
+  const facts = [];
+  const byId = Object.fromEntries(result.checks.map((c) => [c.id, c]));
+  facts.push("A photo.");
+  if (
+    byId.framing &&
+    ["sam", "judgement"].includes(byId.framing.source) &&
+    byId.framing.verdict === "pass"
+  ) {
+    facts.push("The subject is framed whole, with margin on every side.");
+  }
+  if (byId.text && byId.text.source === "model" && byId.text.verdict === "pass") {
+    facts.push(byId.text.detail);
+  }
+  return {
+    text: facts.join(" ").trim(),
+    source: "assembled",
+    note:
+      "Starting draft assembled from what the checks found — this photo has no stated intent and no recorded facts, so nothing here comes from anywhere else. Edit it into your own words, then approve it.",
+  };
+}
+
 function readiness(result, { warningAcknowledged, altTextApproved }) {
   const reasons = [];
   const fixes = result.checks.filter((c) => c.verdict === "fix");
@@ -130,4 +185,4 @@ function buildPublicDescription(take, result) {
   };
 }
 
-module.exports = { buildProofCopy, draftAltText, readiness, buildPublicDescription };
+module.exports = { buildProofCopy, draftAltText, buildUploadProofCopy, draftUploadAltText, readiness, buildPublicDescription };
