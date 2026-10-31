@@ -159,6 +159,20 @@ estimator choice moves no verdict on this set — Wonder's edge in the main
 arm (exactness, consistency, no distrusted replies) is the real difference
 on offer.
 
+## Build addition — check your own photo (Oct 31, 2026)
+
+Ruled by Xander the same evening the research landed: the web app now lets
+a visitor pick a photo from their own library on a phone and have it
+checked live. The picked photo runs through this document's chain minus
+its last leg — SAM 3.1 measurement, then the Wonder/contributor judgement
+tier — with no recorded facts behind it: when neither SAM nor judgement
+can locate the subject, framing and crop read uncertain, never a pass, and
+the result is never labelled "recorded". The photo is processed for the
+check and deleted, never stored. Verified live on the public site the same
+evening: the ST-P4 seed image submitted as a visitor photo reproduced its
+designed crop fix from Muse Wonder's judgement, with the response stating
+plainly that the photo has no recorded facts. Full suite 54/54.
+
 ## Decision and implementation (Oct 31, 2026)
 
 Ruling (the Nexus System, Xander): the judgement tier runs Muse Wonder as
