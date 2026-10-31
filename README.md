@@ -17,6 +17,8 @@ Before a blind creator posts a photo or a short video, Pre-Flight runs six check
 
 Alongside any verdict it can produce, a named private-information warning flags anything in the take that looks private (a readable address, a document, a screen notification) before the creator posts it publicly.
 
+Visitors can also check a photo of their own: pick a photo and the same six checks run on it live. The browser converts the photo to PNG and sends it to the backend, which processes it for the check and deletes it as soon as the check finishes — it is never stored. A supplied photo has no recorded facts and no stated intent, so its framing and crop safety are measured from SAM 3.1's boxes or the judgement tier's estimate, and read uncertain when neither can locate the subject: there is no record to fall back to.
+
 The creator then gets two things in their own words to approve: alt text drafted from their own stated intent for the post, and proof copy — a speech-and-braille-ready text version of what they are about to publish. Deterministic problems get deterministic repairs (re-crop, re-frame suggestions), the checks run again, and nothing is ever published, attached, or marked approved that the creator has not approved themselves.
 
 ## How it is built

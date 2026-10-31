@@ -12,7 +12,11 @@
 // framing, crop safety, and quality; the judgement tier (Muse Wonder,
 // falling back to Muse Spark 1.3-contributor) for text, first
 // impression, and the private-information warning; Muse Voice
-// Transcribe for the audio check. Live model calls are gated on the
+// Transcribe for the audio check. A visitor can also check a photo of
+// their own (POST /api/uploads/check, server/upload.js): the photo is
+// processed for the check and deleted, never stored, and — having no
+// recorded facts — its framing and crop read uncertain when no tier
+// can locate the subject. Live model calls are gated on the
 // funding switch (MODEL_CALLS_ENABLED in model-api.js): while it is
 // off, the model checks report "uncertain" with the reason, never a
 // guessed verdict, and the measured checks run from the takes'
@@ -29,6 +33,7 @@ const { locateBoxes, resolvePhotoBoxes } = require("./sam");
 const { estimateBoxes } = require("./judge");
 const { runAudioCheck } = require("./audio");
 const { buildDescribedAudio } = require("./narrate");
+const { handleUploadCheck } = require("./upload");
 const { buildProofCopy, draftAltText, readiness, buildPublicDescription } = require("./copy");
 const { availableRepairs, applyRepair, applyTransform, composeTransforms } = require("./repair");
 const { sweep } = require("./library");
@@ -864,6 +869,16 @@ const server = http.createServer((req, res) => {
         )
         .catch((err) => sendJson(res, 500, { error: `Readiness failed: ${err.message}` }));
     });
+    return;
+  }
+
+  // Check your own photo: one PNG per request in the raw body, under a
+  // hard size cap enforced while reading; the photo is processed for
+  // the check and deleted, never stored (server/upload.js).
+  if (url.pathname === "/api/uploads/check" && req.method === "POST") {
+    handleUploadCheck(req, res, {
+      scaled: url.searchParams.get("scaled") === "1",
+    }).catch((err) => sendJson(res, 500, { error: `The check failed: ${err.message}` }));
     return;
   }
 

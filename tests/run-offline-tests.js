@@ -711,6 +711,135 @@ const { sweep } = require("../server/library");
     ok("model fallback: described audio shares the order, recorded-facts draft last");
   }
 
+  // 16. Check your own photo (Nexus ruling, Xander, Oct 31, 2026): the
+  // upload pipeline. A supplied photo has no recorded facts and no
+  // stated intent, so the box chain ends at SAM or the judgement tier —
+  // or at honest uncertainty, never a pass and never a "recorded"
+  // source. The HTTP cases run the real handler on an ephemeral port
+  // with stubbed model pieces: no network, no spend.
+  const {
+    buildUploadChecks,
+    handleUploadCheck,
+    UPLOAD_TMP_DIR,
+    MAX_UPLOAD_BYTES,
+  } = require("../server/upload");
+  const http = require("http");
+  // Start from a clean temp dir so leftovers can be asserted exactly.
+  fs.mkdirSync(UPLOAD_TMP_DIR, { recursive: true });
+  for (const f of fs.readdirSync(UPLOAD_TMP_DIR)) {
+    fs.unlinkSync(path.join(UPLOAD_TMP_DIR, f));
+  }
+  const uploadSeg = async (buf, concept) =>
+    concept === "person"
+      ? [{ x0: 324, y0: 201, x1: 676, y1: 798 }]
+      : [{ x0: 301, y0: 621, x1: 699, y1: 720 }];
+  const uploadChat = async () => good;
+
+  const upSam = await buildUploadChecks(p1buf, { segmenter: uploadSeg, chat: uploadChat });
+  assert.strictEqual(upSam.origin, "upload");
+  assert.strictEqual(upSam.measurementSource, "sam");
+  assert.strictEqual(upSam.checks.length, 6, "the upload result carries all six checks");
+  assert.strictEqual(upSam.checks.find((c) => c.id === "framing").verdict, "pass");
+  assert.strictEqual(upSam.checks.find((c) => c.id === "framing").source, "sam");
+  assert.strictEqual(upSam.checks.find((c) => c.id === "quality").source, "measured");
+  assert(
+    upSam.checks.every((c) => c.source !== "recorded"),
+    "an upload's checks never claim a recorded source"
+  );
+  assert(upSam.note.includes("no recorded facts"), "the response states the missing recorded facts plainly");
+  ok("upload (a): a valid PNG returns the checks shape, sourced from SAM, never recorded");
+
+  const upJudged = await buildUploadChecks(p1buf, {
+    segmenter: async () => [],
+    judge: async () => ({ status: "ok", ...estimated, model: "muse-wonder-1.0" }),
+    chat: uploadChat,
+  });
+  assert.strictEqual(upJudged.measurementSource, "judgement");
+  assert.strictEqual(upJudged.checks.find((c) => c.id === "crop").source, "judgement");
+  assert.strictEqual(upJudged.checks.find((c) => c.id === "framing").verdict, "pass");
+  ok("upload: SAM no-match → the judgement tier sources a supplied photo's framing/crop");
+
+  const upLost = await buildUploadChecks(p1buf, {
+    segmenter: async () => [],
+    judge: async () => {
+      throw new Error("The model reply could not be read as the required box shape, so it is not trusted.");
+    },
+    chat: uploadChat,
+  });
+  assert.strictEqual(upLost.measurementSource, "judgement-unavailable");
+  assert.strictEqual(upLost.checks.find((c) => c.id === "framing").verdict, "uncertain");
+  assert.strictEqual(upLost.checks.find((c) => c.id === "crop").verdict, "uncertain");
+  const upFailed = await buildUploadChecks(p1buf, {
+    segmenter: async () => {
+      throw new Error("SAM call failed with HTTP 500.");
+    },
+    chat: uploadChat,
+  });
+  assert.strictEqual(upFailed.measurementSource, "sam-failed");
+  assert.strictEqual(upFailed.checks.find((c) => c.id === "framing").verdict, "uncertain");
+  ok("upload (d): no tier can locate the subject → framing/crop uncertain, never a pass");
+
+  const uploadHttp = http.createServer((req, res) => {
+    if (req.url.startsWith("/api/uploads/check")) {
+      handleUploadCheck(req, res, { segmenter: uploadSeg, chat: uploadChat }).catch((err) => {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: err.message }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((resolve) => uploadHttp.listen(0, "127.0.0.1", resolve));
+  const upBase = `http://127.0.0.1:${uploadHttp.address().port}`;
+  try {
+    // (e) A completed request deletes its temp file.
+    const okRes = await fetch(`${upBase}/api/uploads/check`, {
+      method: "POST",
+      headers: { "Content-Type": "image/png" },
+      body: p1buf,
+    });
+    assert.strictEqual(okRes.status, 200);
+    const okBody = await okRes.json();
+    assert.strictEqual(okBody.origin, "upload");
+    assert.strictEqual(okBody.measurementSource, "sam");
+    assert.deepStrictEqual(
+      fs.readdirSync(UPLOAD_TMP_DIR),
+      [],
+      "the temp file is deleted when the request finishes"
+    );
+    ok("upload (e): a completed request leaves the temp dir empty");
+
+    // (c) A non-PNG body is rejected before any file exists.
+    const badRes = await fetch(`${upBase}/api/uploads/check`, {
+      method: "POST",
+      headers: { "Content-Type": "image/png" },
+      body: Buffer.from("this is not a png"),
+    });
+    assert.strictEqual(badRes.status, 415);
+    const badBody = await badRes.json();
+    assert(badBody.error.includes("not a PNG"), "the rejection says why, plainly");
+    assert.deepStrictEqual(fs.readdirSync(UPLOAD_TMP_DIR), [], "a rejected body leaves nothing behind");
+    ok("upload (c): a non-PNG body is rejected with a clear error, nothing stored");
+
+    // (b) An over-cap body is rejected under the cap — 413, and no
+    // file ever reaches the temp dir.
+    const bigRes = await fetch(`${upBase}/api/uploads/check`, {
+      method: "POST",
+      headers: { "Content-Type": "image/png" },
+      body: Buffer.alloc(MAX_UPLOAD_BYTES + 1024, 1),
+    });
+    assert.strictEqual(bigRes.status, 413);
+    assert.deepStrictEqual(
+      fs.readdirSync(UPLOAD_TMP_DIR),
+      [],
+      "an over-cap upload never reaches the temp dir"
+    );
+    ok("upload (b): an over-cap body is rejected at the cap, no file left behind");
+  } finally {
+    uploadHttp.close();
+  }
+
   console.log(`\n${passed} test groups passed.`);
 }
 

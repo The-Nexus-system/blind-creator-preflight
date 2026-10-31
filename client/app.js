@@ -476,3 +476,219 @@ function renderLibrary() {
 loadLibrary().catch(() => {
   libraryEl.replaceChildren(el("p", "The sweep could not be loaded. The backend may not be running."));
 });
+
+// --- Check your own photo --------------------------------------------------
+// The creator picks one photo from their own library or files — the
+// phone's own permission and picker stand between the app and the
+// library, and the app receives only the photo chosen. The browser
+// decodes it with its EXIF orientation applied (HEIC included, where
+// the browser can) and re-encodes it as PNG, so the server receives
+// the format its pipeline already reads.
+//
+// iOS Safari refuses canvases over 16,777,216 total pixels — a 24 or
+// 48 megapixel photo at native size fails, often silently (a blank
+// canvas) — so the working size is capped at decode time, safely
+// under that ceiling, and the draw down to it goes in halving steps
+// rather than one large reduction. If the resulting PNG would still
+// exceed the server's cap, the copy is scaled down further — longest
+// side at most 3000 pixels, then smaller if the limit still requires
+// it — and the server is told, so the result says a scaled copy was
+// checked. The photo is processed for the check and not stored; the
+// results render with textContent only, like every result here.
+
+const ownPhotoInput = document.getElementById("own-photo-input");
+const ownPhotoStatusEl = document.getElementById("own-photo-status");
+const UPLOAD_CAP_BYTES = 15 * 1024 * 1024; // the server's cap (server/upload.js)
+const SCALED_LONG_EDGE = 3000;
+const CANVAS_PIXEL_CEILING = 16000000; // safely under iOS Safari's 16,777,216
+
+function canvasPngBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new Error("The browser could not encode the photo as PNG."))),
+      "image/png"
+    );
+  });
+}
+
+// Decodes the picked file with its EXIF orientation applied, via
+// createImageBitmap where it is offered, and via an image element
+// otherwise (which applies the orientation itself in current
+// browsers). Returns { source, width, height, dispose }.
+async function decodePhoto(file) {
+  if (window.createImageBitmap) {
+    try {
+      const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+      return { source: bitmap, width: bitmap.width, height: bitmap.height, dispose: () => bitmap.close() };
+    } catch {
+      // Fall through to the image-element path.
+    }
+  }
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error("the browser could not decode the photo"));
+      image.src = objectUrl;
+    });
+    return { source: img, width: img.naturalWidth, height: img.naturalHeight, dispose: () => {} };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+function cappedDims(width, height, maxPixels) {
+  const total = width * height;
+  if (total <= maxPixels) return { width, height, capped: false };
+  const f = Math.sqrt(maxPixels / total);
+  return {
+    width: Math.max(1, Math.floor(width * f)),
+    height: Math.max(1, Math.floor(height * f)),
+    capped: true,
+  };
+}
+
+// Encodes the decoded photo as PNG at the target size. The draw goes
+// in halving steps while the picture is more than twice the target,
+// so no canvas is ever larger than the step being drawn and large
+// reductions stay sharp; the last draw lands on the exact target.
+async function encodePhotoPng(source, srcW, srcH, targetW, targetH) {
+  let cur = source;
+  let curW = srcW;
+  let curH = srcH;
+  while (curW > targetW * 2 && curH > targetH * 2) {
+    const hw = Math.max(1, Math.floor(curW / 2));
+    const hh = Math.max(1, Math.floor(curH / 2));
+    const step = document.createElement("canvas");
+    step.width = hw;
+    step.height = hh;
+    step.getContext("2d").drawImage(cur, 0, 0, hw, hh);
+    cur = step;
+    curW = hw;
+    curH = hh;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = targetW;
+  canvas.height = targetH;
+  canvas.getContext("2d").drawImage(cur, 0, 0, targetW, targetH);
+  return canvasPngBlob(canvas);
+}
+
+function renderUploadResults(data) {
+  const frag = document.createDocumentFragment();
+  frag.appendChild(el("h3", "Your photo — pre-flight results"));
+  frag.appendChild(el("p", data.note));
+  if (data.scalingNote) frag.appendChild(el("p", data.scalingNote));
+  if (data.measurementNote) frag.appendChild(el("p", data.measurementNote));
+  const list = el("ul");
+  for (const check of data.checks) {
+    const sourceWord = SOURCE_WORDS[check.source] || check.source;
+    list.appendChild(el("li", `${check.name}: ${check.verdict} (${sourceWord}) — ${check.detail}`));
+  }
+  frag.appendChild(list);
+
+  if (data.privacyWarning) {
+    const warnSource =
+      data.privacyWarningSource === "model"
+        ? "found by the model check"
+        : "source unconfirmed";
+    frag.appendChild(el("h3", `Warning — ${data.privacyWarning.name}`));
+    frag.appendChild(el("p", data.privacyWarning.detail));
+    frag.appendChild(el("p", `Warning source: ${warnSource}.`));
+  }
+
+  const fixes = data.checks.filter((c) => c.verdict === "fix").length;
+  const uncertains = data.checks.filter((c) => c.verdict === "uncertain").length;
+  const summary = data.privacyWarning
+    ? "Not ready to post: a private-information warning needs your decision first."
+    : fixes > 0
+      ? `Not ready to post yet: ${fixes} check${fixes === 1 ? "" : "s"} to fix.`
+      : uncertains > 0
+        ? "Some checks could not be settled for this photo — each one says why above."
+        : "Ready to post: every check passes.";
+  frag.appendChild(el("p", summary));
+  composerStatusEl.textContent = summary;
+  resultsEl.replaceChildren(frag);
+}
+
+async function checkOwnPhoto() {
+  const file = ownPhotoInput.files && ownPhotoInput.files[0];
+  if (!file) return;
+  session = null;
+  ownPhotoStatusEl.textContent = "Reading your photo…";
+  resultsEl.replaceChildren(el("p", "Running the six checks on your photo…"));
+  repairsEl.replaceChildren(
+    el("p", "Repairs belong to the seeded takes; a photo of your own gets the checks themselves.")
+  );
+  copyAreaEl.replaceChildren(
+    el("p", "Proof copy and alt text belong to the seeded takes in this demo; a photo of your own gets the checks themselves.")
+  );
+  publicAreaEl.replaceChildren(
+    el("p", "The public description belongs to the seeded takes in this demo.")
+  );
+  let decoded = null;
+  try {
+    decoded = await decodePhoto(file);
+    if (!decoded.width || !decoded.height) {
+      throw new Error("the browser decoded the photo to no size");
+    }
+
+    // The working size is capped at decode time (the canvas ceiling),
+    // then by file size: a copy over the server's cap is reduced to a
+    // 3000-pixel longest side, and further in steps if it must.
+    let dims = cappedDims(decoded.width, decoded.height, CANVAS_PIXEL_CEILING);
+    let scaled = dims.capped;
+    let blob = await encodePhotoPng(decoded.source, decoded.width, decoded.height, dims.width, dims.height);
+    if (blob.size > UPLOAD_CAP_BYTES) {
+      const f = Math.min(1, SCALED_LONG_EDGE / Math.max(dims.width, dims.height));
+      dims = {
+        width: Math.max(1, Math.round(dims.width * f)),
+        height: Math.max(1, Math.round(dims.height * f)),
+      };
+      scaled = true;
+      blob = await encodePhotoPng(decoded.source, decoded.width, decoded.height, dims.width, dims.height);
+      while (blob.size > UPLOAD_CAP_BYTES && dims.width > 64 && dims.height > 64) {
+        dims = {
+          width: Math.max(1, Math.floor(dims.width * 0.8)),
+          height: Math.max(1, Math.floor(dims.height * 0.8)),
+        };
+        blob = await encodePhotoPng(decoded.source, decoded.width, decoded.height, dims.width, dims.height);
+      }
+    }
+    if (blob.size > UPLOAD_CAP_BYTES) {
+      ownPhotoStatusEl.textContent = "That photo is still too large to check even after scaling down. Nothing was sent.";
+      resultsEl.replaceChildren(el("p", "The photo was not checked: even a scaled copy exceeds the 15 MB limit."));
+      return;
+    }
+
+    ownPhotoStatusEl.textContent = scaled
+      ? "Checking a scaled copy of your photo…"
+      : "Checking your photo…";
+    const res = await fetch(`/api/uploads/check${scaled ? "?scaled=1" : ""}`, {
+      method: "POST",
+      headers: { "Content-Type": "image/png" },
+      body: blob,
+    });
+    const data = await res.json();
+    if (data.error) {
+      ownPhotoStatusEl.textContent = `The check could not run: ${data.error}`;
+      resultsEl.replaceChildren(el("p", `The photo was not checked: ${data.error}`));
+      return;
+    }
+    ownPhotoStatusEl.textContent =
+      "Your photo has been checked. The results are in the results section; the photo itself was not stored.";
+    renderUploadResults(data);
+  } catch (err) {
+    ownPhotoStatusEl.textContent =
+      "That photo could not be read in this browser, so it was not checked. A JPEG or PNG copy of it will work.";
+    resultsEl.replaceChildren(
+      el("p", "The photo was not checked: this browser could not decode it.")
+    );
+  } finally {
+    if (decoded) decoded.dispose();
+    ownPhotoInput.value = "";
+  }
+}
+
+ownPhotoInput.addEventListener("change", checkOwnPhoto);

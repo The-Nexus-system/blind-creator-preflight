@@ -23,6 +23,10 @@ out/
 .DS_Store
 Thumbs.db
 
+# The checker's temp dir for visitor-supplied photos — processed for
+# the check and deleted with the request, never stored, never committed
+server/uploads-tmp/
+
 # Local media and test captures (seeded takes are added deliberately, by name)
 *.mov
 *.mp4
