@@ -127,9 +127,15 @@ difference, not an estimation error, and no model swap changes it).
 Reachability: one Muse Wonder call executed from inside the Fly deployment,
 through the app's own model code over the pinned route, returned a real
 completion — Wonder is reachable in production exactly as Spark is. Cost
-note: Wonder is the premium-priced tier, which is a product consideration
-outside this measurement; the choice of model for the judgement tier is the
-Nexus System's decision.
+note, with the figures (per million tokens, Standard mode, as published by
+Meta and consistent across the trackers that quote its pricing pages, and
+with this project's own October research): Muse Wonder is $4.00 input /
+$20.00 output; Muse Spark 1.3 Standard is $1.25 input / $4.25 output —
+Wonder is roughly 3.2× the input price and 4.7× the output price. On this
+project's own per-check cost model (about 3,000 input and 800 output tokens
+for a photo's model work), the model portion of a photo check is about
+0.7 cents on Spark Standard and about 2.8 cents on Wonder. The choice of
+model for the judgement tier is the Nexus System's decision.
 
 The remaining family members were run through the identical harness
 (Oct 30, 60 calls, 57 trusted replies, no transport errors). On verdicts it
