@@ -159,6 +159,34 @@ estimator choice moves no verdict on this set — Wonder's edge in the main
 arm (exactness, consistency, no distrusted replies) is the real difference
 on offer.
 
+## Decision and implementation (Oct 31, 2026)
+
+Ruling (the Nexus System, Xander): the judgement tier runs Muse Wonder as
+the primary model, with Muse Spark 1.3-contributor as its fallback, and
+the contributor tier's training permission is accepted for this test
+("let him train on our media"). The product tier shape decided the same
+evening — free on the contributor model, a no-training free route on Spark
+1.3 Standard with usage limits, premium on Wonder at about $5/month — is
+recorded in the project's product notes (PRODUCT-TIERS.md in the hackathon
+folder), not in this build.
+
+Implemented the same evening (commit 38b8193): a single shared wrap in
+server/model-api.js sends every judgement call (box estimation, semantic
+checks, described-audio drafting) to Wonder first; a transport/API error or
+a reply the callers' strict validation distrusts retries the identical call
+once on Muse Spark 1.3-contributor; if that also fails, the pre-existing
+honest behaviour stands. The funding switch gates both models and does not
+trigger the fallback. Suite 48/48, including stubbed tests for each fallback
+path. Deployed and verified live on the public site: every designed outcome
+reproduced (ST-P1 all pass via SAM; ST-P2 framing fix and ST-P4 crop fix via
+judgement; ST-P8's privacy warning fires and its crop reads fix; ST-V2's
+full designed set, silence wording intact). Wonder answered every judgement
+call in the live battery; the fallback was never needed live and is proven
+by the stubbed tests. One observation recorded for honesty: under Wonder,
+ST-P2 and ST-P4 also return a first-impression fix (their flat-shape figures
+read as abstract shapes to the model) — not a designed verdict in either
+direction, noted here because it changes those takes' profiles.
+
 ## What this adds up to
 
 SAM measures where it can see; Spark judges, drafts, and estimates where SAM
