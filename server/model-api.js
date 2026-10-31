@@ -8,7 +8,10 @@
 // not in the repo, not in the client, not in any log.
 //
 // Call shapes, verified against Meta's official sources (Oct 28, 2026):
-// - Muse Spark vision/judgement: POST /v1/chat/completions (OpenAI-style).
+// - Judgement (vision/chat): POST /v1/chat/completions (OpenAI-style).
+//   Since the Nexus's ruling of Oct 31, 2026 the judgement tier runs
+//   Muse Wonder first and falls back to Muse Spark 1.3-contributor —
+//   see chatJudgement below, the one place that order lives.
 // - Muse Voice Transcribe (files): POST /v1/asr/transcribe (multipart).
 // - SAM 3.1: streamed over POST /v1/responses with the image as a data URL
 //   and one noun-phrase concept per request; the streamed grammar is decoded
@@ -92,6 +95,74 @@ async function chatCompletions({ model = "muse-spark-1.3", messages, temperature
     : null;
   if (typeof text !== "string") throw new Error("Model API chat reply had no text content.");
   return text;
+}
+
+class ModelReplyUntrusted extends Error {
+  constructor() {
+    super(
+      "Neither the primary model's reply nor the fallback model's reply could be read as the required shape, so neither is trusted."
+    );
+    this.code = "MODEL_REPLY_UNTRUSTED";
+  }
+}
+
+// The judgement tier, per the Nexus System's ruling (Xander, Oct 31,
+// 2026): Muse Wonder is the primary judgement model; when Wonder is
+// unavailable (a transport/API error) or its reply cannot be trusted,
+// the same call is retried ONCE with Muse Spark 1.3-contributor as the
+// fallback. Spark 1.3-contributor runs in Contributor mode, under which
+// Meta may use prompts and completions for training — that is stated
+// plainly in the README, and it is why the contributor model is only
+// ever the fallback, never the primary. (The fallback the ruling
+// replaced was Muse Spark 1.3 Standard.)
+const JUDGEMENT_PRIMARY_MODEL = "muse-wonder-1.0";
+const JUDGEMENT_FALLBACK_MODEL = "muse-spark-1.3-contributor";
+
+// One judgement call with the Wonder → Spark-contributor fallback,
+// shared by every judgement caller (box estimation, semantic checks,
+// described-audio drafting) so the semantics are identical everywhere:
+//
+// - The two attempts differ ONLY in the model: same messages, same
+//   temperature.
+// - `validate` (optional) is the caller's strict reply parser: it
+//   returns a truthy parsed value for a reply that can be trusted, or
+//   null for one that cannot. A distrusted Wonder reply triggers the
+//   fallback exactly like a failed call does; a distrusted fallback
+//   reply throws ModelReplyUntrusted. A distrusted reply from either
+//   model never reaches a verdict.
+// - Calls switched off (ModelCallsDisabled) is NOT a fallback trigger:
+//   the switch gates every model, so it propagates immediately and the
+//   caller reports its calls-off state as before.
+// - When both attempts fail with call errors, the fallback attempt's
+//   error is thrown — the last failure is the one reported.
+// - The chat function is injectable for offline tests; production uses
+//   chatCompletions. Resolves { text, value, model } — `value` is the
+//   validated parse (or the raw text when no validator was given) and
+//   `model` names the model whose reply was used, so callers can label
+//   the source honestly.
+async function chatJudgement({ messages, temperature = 0, validate, chat }) {
+  const call = chat || chatCompletions;
+  const models = [JUDGEMENT_PRIMARY_MODEL, JUDGEMENT_FALLBACK_MODEL];
+  for (let attempt = 0; attempt < models.length; attempt++) {
+    const model = models[attempt];
+    const last = attempt === models.length - 1;
+    let text;
+    try {
+      text = await call({ model, messages, temperature });
+    } catch (err) {
+      if (err instanceof ModelCallsDisabled || (err && err.code === "MODEL_CALLS_DISABLED")) {
+        throw err;
+      }
+      if (last) throw err;
+      continue;
+    }
+    if (!validate) return { text, value: text, model };
+    const value = validate(text);
+    if (value) return { text, value, model };
+    if (last) throw new ModelReplyUntrusted();
+  }
+  // Unreachable: the final attempt always returns or throws.
+  throw new ModelReplyUntrusted();
 }
 
 async function transcribeFile(buffer, filename = "audio.wav") {
@@ -194,4 +265,13 @@ async function segmentImage(buffer, concept, width, height) {
     .map((b) => ({ x0: b.left, y0: b.top, x1: b.right, y1: b.bottom }));
 }
 
-module.exports = { chatCompletions, transcribeFile, segmentImage, ModelCallsDisabled };
+module.exports = {
+  chatCompletions,
+  chatJudgement,
+  transcribeFile,
+  segmentImage,
+  ModelCallsDisabled,
+  ModelReplyUntrusted,
+  JUDGEMENT_PRIMARY_MODEL,
+  JUDGEMENT_FALLBACK_MODEL,
+};

@@ -9,9 +9,12 @@
 // it says, the hands-up window, the duration). Two drafters, one slot,
 // labelled like every other text in this app:
 //
-// - "model": Muse Spark drafts from the recorded facts when live calls
-//   are on. Its reply is parsed strictly — timed segments inside the
-//   take's duration, or the reply is distrusted wholesale.
+// - "model": the judgement tier drafts from the recorded facts when
+//   live calls are on — Muse Wonder, falling back to Muse Spark
+//   1.3-contributor when Wonder is unavailable or its reply cannot be
+//   trusted (model-api.js's chatJudgement). The reply is parsed
+//   strictly — timed segments inside the take's duration, or the
+//   reply is distrusted wholesale.
 // - "recorded-facts": the deterministic draft, assembled from the same
 //   recorded facts when calls are off or the model reply cannot be
 //   trusted. Nothing is described that no recorded fact states.
@@ -28,7 +31,7 @@
 // enough — which is the case the Nexus directed on Oct 30, 2026: the
 // silent video gets its audio descriptions.
 
-const { chatCompletions, ModelCallsDisabled } = require("./model-api");
+const { chatJudgement } = require("./model-api");
 
 // The deterministic draft, from the take's recorded facts only.
 function deterministicSegments(sidecar) {
@@ -140,20 +143,24 @@ async function buildDescribedAudio(take, sidecar, transcript, chat) {
     ? "Draft described-audio script for a silent take: with no speech on the track, the narration never overlaps dialogue. It stays a draft until you approve it — the same rule as the alt text."
     : "Draft described-audio script, fitted to the take's recorded timeline and its transcribed speech. It stays a draft until you approve it — the same rule as the alt text.";
 
-  const call = chat || chatCompletions;
-  let reply = null;
+  // The model draft goes through the judgement tier's shared fallback
+  // (chatJudgement): Muse Wonder first, Muse Spark 1.3-contributor
+  // once if Wonder's call fails or its reply is distrusted. Any failure
+  // left after that — calls off, a failed call, an untrusted reply —
+  // falls back to the recorded-facts draft below, labelled as what it
+  // is: the script is a draft either way, and the fallback invents
+  // nothing.
+  let modelSegments = null;
   try {
-    reply = await call({
+    const result = await chatJudgement({
+      chat,
+      validate: (text) => parseScript(text, Number(sidecar.seconds)),
       messages: [{ role: "user", content: [{ type: "text", text: buildPrompt(take, sidecar, transcript) }] }],
     });
-  } catch (err) {
-    if (!(err instanceof ModelCallsDisabled) && !(err && err.code === "MODEL_CALLS_DISABLED")) {
-      // A real model failure falls back to the recorded-facts draft
-      // below, labelled as what it is — the script is a draft either
-      // way, and the fallback invents nothing.
-    }
+    modelSegments = result.value;
+  } catch {
+    modelSegments = null;
   }
-  const modelSegments = reply ? parseScript(reply, Number(sidecar.seconds)) : null;
   if (modelSegments) {
     return { available: true, state: "draft", source: "model", segments: modelSegments, note };
   }

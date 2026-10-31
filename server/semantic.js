@@ -1,7 +1,10 @@
 "use strict";
 
 // Semantic checks — the judgements measurement cannot make, asked of
-// Muse Spark in a single vision call per take:
+// the judgement tier in a single vision call per take. Since the
+// Nexus's ruling of Oct 31, 2026, that is Muse Wonder, falling back
+// to Muse Spark 1.3-contributor when Wonder is unavailable or its
+// reply cannot be trusted (model-api.js's chatJudgement):
 //
 // - text in the image: what any visible text says, in reading order, and
 //   whether it is fully legible;
@@ -13,8 +16,9 @@
 //   inside another check's report.
 //
 // The reply is parsed strictly: a verdict must be one of pass / fix /
-// uncertain and every field must be present, or the whole reply is
-// distrusted and every check falls back to "uncertain" with the reason.
+// uncertain and every field must be present, or the reply is distrusted
+// — first Wonder's, then the contributor fallback's — and if neither
+// can be trusted every check falls back to "uncertain" with the reason.
 // The model is never allowed to make an unreadable answer look like a pass.
 //
 // When live calls are switched off (funding switch in model-api.js), these
@@ -22,7 +26,7 @@
 // verdict in this design, not a stand-in: the app says what it does not
 // know and why.
 
-const { chatCompletions, ModelCallsDisabled } = require("./model-api");
+const { chatJudgement, ModelCallsDisabled, ModelReplyUntrusted } = require("./model-api");
 
 const VERDICTS = new Set(["pass", "fix", "uncertain"]);
 
@@ -73,10 +77,16 @@ function parseSemanticReply(text) {
   };
 }
 
-async function runSemanticChecks(imageBuffer, intent) {
-  let replyText;
+// Runs the semantic checks for one image. The chat function is
+// injectable for offline tests and is passed through to chatJudgement,
+// which tries Muse Wonder first and Muse Spark 1.3-contributor once
+// if Wonder's call fails or its reply is distrusted.
+async function runSemanticChecks(imageBuffer, intent, chat) {
+  let result;
   try {
-    replyText = await chatCompletions({
+    result = await chatJudgement({
+      chat,
+      validate: parseSemanticReply,
       messages: [
         {
           role: "user",
@@ -100,6 +110,16 @@ async function runSemanticChecks(imageBuffer, intent) {
         privacyWarningSource: "model-off",
       };
     }
+    if (err instanceof ModelReplyUntrusted || (err && err.code === "MODEL_REPLY_UNTRUSTED")) {
+      const reason = "The model reply could not be read as the required verdict shape, so it is not trusted.";
+      return {
+        source: "model-unreadable",
+        text: uncertain(reason),
+        firstImpression: uncertain(reason),
+        privacyWarning: null,
+        privacyWarningSource: "model-unreadable",
+      };
+    }
     const reason = `The model check failed (${err.message}) No verdict is guessed from a failed call.`;
     return {
       source: "model-error",
@@ -109,18 +129,7 @@ async function runSemanticChecks(imageBuffer, intent) {
       privacyWarningSource: "model-error",
     };
   }
-  const parsed = parseSemanticReply(replyText);
-  if (!parsed) {
-    const reason = "The model reply could not be read as the required verdict shape, so it is not trusted.";
-    return {
-      source: "model-unreadable",
-      text: uncertain(reason),
-      firstImpression: uncertain(reason),
-      privacyWarning: null,
-      privacyWarningSource: "model-unreadable",
-    };
-  }
-  return { source: "model", ...parsed, privacyWarningSource: "model" };
+  return { source: "model", model: result.model, ...result.value, privacyWarningSource: "model" };
 }
 
 module.exports = { runSemanticChecks, parseSemanticReply, buildPrompt };

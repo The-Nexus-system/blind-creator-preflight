@@ -7,21 +7,22 @@
 // app turns into relative measurements. This module is the one place the
 // checks pipeline talks to that assignment, and it encodes the outcomes
 // honestly, down the fallback chain in the Nexus's order (Oct 30, 2026):
-// SAM measurement first, then Muse Spark judgement, and the take's
+// SAM measurement first, then model judgement (since Oct 31, 2026: Muse
+// Wonder, falling back to Muse Spark 1.3-contributor), and the take's
 // recorded facts last.
 //
 // - SAM answers with a subject box: those boxes replace the take's
 //   recorded ground truth for this check run, and the verdicts say their
 //   source is SAM.
-// - SAM answers with no match for the subject: the next tier is Muse
-//   Spark JUDGEMENT (server/judge.js) — it estimates the boxes, and the
+// - SAM answers with no match for the subject: the next tier is model
+//   JUDGEMENT (server/judge.js) — it estimates the boxes, and the
 //   verdicts say their source is judgement, never SAM. A no-match is an
 //   answer, not a failure — SAM returns it for the flat-shape figures in
 //   some seeded takes (verified live Oct 30, 2026: ST-P2, ST-P4, and
 //   ST-P8 return no boxes for either concept, from both this machine
 //   and the Fly deployment, while ST-P1's drawn figure segments
 //   cleanly).
-// - Spark's judgement cannot supply boxes either (calls switched off, a
+// - The judgement tier cannot supply boxes either (calls switched off, a
 //   failed call, an untrusted reply): the take's recorded facts stand,
 //   where the take has them. A take with no recorded facts has nothing
 //   left to measure from: its measurements are "uncertain" with the
@@ -70,13 +71,14 @@ async function locateBoxes(buffer, segmenter) {
 
 // Resolves which boxes a PHOTO take's framing/crop measurement uses,
 // down the fallback chain in the Nexus's order: SAM measurement first,
-// then Muse Spark judgement, and the take's recorded facts last.
+// then model judgement, and the take's recorded facts last.
 // `recorded` is the take's recorded ground truth (its seeded sidecar,
 // or a repair's computed geometry); the segmenter and the estimator
 // are injectable for offline tests. Returns one of:
 //   { kind: "sam", groundTruth }                    — SAM's boxes.
-//   { kind: "judgement", groundTruth }              — Spark's estimated
-//     boxes; reported as judgement wherever they are used.
+//   { kind: "judgement", groundTruth, judgementModel } — the judgement
+//     tier's estimated boxes; reported as judgement wherever they are
+//     used, with the model that made them named.
 //   { kind: "recorded", groundTruth, samAnswered, judgementMiss }
 //     — recorded facts; samAnswered says whether SAM was asked and
 //     found no subject match (true) or was never asked because calls
@@ -106,14 +108,14 @@ async function resolvePhotoBoxes({ buffer, recorded, segmenter, judge, intent })
       kind: "judgement-unavailable",
       callsOff: true,
       reason:
-        "Live model calls are switched off, so neither SAM 3.1's measurement nor Muse Spark's judgement can supply the boxes, and this take has no recorded facts to measure from. Framing and crop safety are uncertain rather than guessed.",
+        "Live model calls are switched off, so neither SAM 3.1's measurement nor the judgement tier (Muse Wonder, falling back to Muse Spark 1.3-contributor) can supply the boxes, and this take has no recorded facts to measure from. Framing and crop safety are uncertain rather than guessed.",
     };
   }
   if (located.subject) {
     return { kind: "sam", groundTruth: { subject: located.subject, sign: located.sign } };
   }
-  // SAM answered with no match for the subject. The next tier is Muse
-  // Spark judgement, reported as measured-by-judgement — never as a
+  // SAM answered with no match for the subject. The next tier is model
+  // judgement, reported as measured-by-judgement — never as a
   // SAM measurement. The recorded facts are the last resort.
   const estimate = judge || estimateBoxes;
   let judged = null;
@@ -128,7 +130,11 @@ async function resolvePhotoBoxes({ buffer, recorded, segmenter, judge, intent })
     judged = null;
   }
   if (judged && judged.status === "ok") {
-    return { kind: "judgement", groundTruth: { subject: judged.subject, sign: judged.sign } };
+    return {
+      kind: "judgement",
+      groundTruth: { subject: judged.subject, sign: judged.sign },
+      judgementModel: judged.model || null,
+    };
   }
   if (hasRecorded) {
     return { kind: "recorded", groundTruth: recorded, samAnswered: true, judgementMiss };
@@ -136,7 +142,7 @@ async function resolvePhotoBoxes({ buffer, recorded, segmenter, judge, intent })
   return {
     kind: "judgement-unavailable",
     callsOff: judgementMiss.mode === "off",
-    reason: `SAM 3.1 returned no match for the subject in this take. Muse Spark's judgement — the next tier — could not supply the boxes (${judgementMiss.detail}), and the take has no recorded facts to measure from. Framing and crop safety are uncertain rather than guessed.`,
+    reason: `SAM 3.1 returned no match for the subject in this take. The judgement tier — Muse Wonder, then Muse Spark 1.3-contributor — could not supply the boxes (${judgementMiss.detail}), and the take has no recorded facts to measure from. Framing and crop safety are uncertain rather than guessed.`,
   };
 }
 

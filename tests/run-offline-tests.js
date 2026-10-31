@@ -11,9 +11,11 @@
 // 3. The measured geometry/quality verdicts on the seeded photo takes match
 //    the design record's assertions (tests/expected-verdicts.json).
 // 4. The SAM wiring's branches (boxes used, no-match handing to the
-//    Spark-judgement tier, calls-off, reported failure), the judgement
+//    judgement tier, calls-off, reported failure), the judgement
 //    tier itself in the Nexus's corrected order (SAM, then judgement,
-//    recorded facts last), the audio check's branches (silent take,
+//    recorded facts last), the judgement tier's model order (Muse
+//    Wonder primary, Muse Spark 1.3-contributor fallback — section
+//    15), the audio check's branches (silent take,
 //    judged transcript, every failure shape), and the described-audio
 //    script (model draft, recorded-facts draft, gap honesty) — all
 //    through injected stubs, still no network.
@@ -597,6 +599,117 @@ const { sweep } = require("../server/library");
     "an unreadable estimate reply throws rather than returning boxes"
   );
   ok("judgement parser: non-JSON, out-of-range, and zero-extent replies are all distrusted");
+
+  // 15. The judgement tier's model order (Nexus ruling, Xander, Oct 31,
+  // 2026): Muse Wonder primary, Muse Spark 1.3-contributor fallback.
+  // The wrap is shared (model-api.js's chatJudgement), so the cases run
+  // through all three callers — box estimation, semantic checks, and
+  // the described-audio draft — with recording stubs: no network.
+  const { JUDGEMENT_PRIMARY_MODEL, JUDGEMENT_FALLBACK_MODEL } = require("../server/model-api");
+  assert.strictEqual(JUDGEMENT_PRIMARY_MODEL, "muse-wonder-1.0");
+  assert.strictEqual(JUDGEMENT_FALLBACK_MODEL, "muse-spark-1.3-contributor");
+  function recordingChat(behaviors) {
+    const calls = [];
+    const chat = async (args) => {
+      calls.push(args);
+      const behavior = behaviors[Math.min(calls.length - 1, behaviors.length - 1)];
+      if (behavior instanceof Error) throw behavior;
+      return behavior;
+    };
+    return { chat, calls };
+  }
+  const goodBoxes = JSON.stringify(estimated);
+  const http500 = new Error("Model API chat call failed with HTTP 500.");
+
+  // (a) Wonder answers readably → the fallback is never called.
+  {
+    const { chat, calls } = recordingChat([goodBoxes]);
+    const r = await estimateBoxes(p1buf, "intent", chat);
+    assert.strictEqual(r.status, "ok");
+    assert.strictEqual(r.model, "muse-wonder-1.0", "the answering model is reported");
+    assert.strictEqual(calls.length, 1, "no fallback call when Wonder succeeds");
+    assert.strictEqual(calls[0].model, "muse-wonder-1.0");
+    ok("model fallback (a): Wonder success → no fallback call, model named");
+  }
+
+  // (b) Wonder's call fails → the same call is retried once on the
+  // contributor fallback, identical but for the model.
+  {
+    const { chat, calls } = recordingChat([http500, goodBoxes]);
+    const r = await estimateBoxes(p1buf, "intent", chat);
+    assert.strictEqual(r.status, "ok");
+    assert.strictEqual(r.model, "muse-spark-1.3-contributor");
+    assert.strictEqual(calls.length, 2, "exactly one fallback attempt");
+    assert.strictEqual(calls[1].model, "muse-spark-1.3-contributor");
+    assert.deepStrictEqual(calls[1].messages, calls[0].messages, "the retry sends the identical prompt");
+    assert.strictEqual(calls[1].temperature, calls[0].temperature, "and the identical temperature");
+    ok("model fallback (b): Wonder transport error → contributor answers the identical call");
+  }
+
+  // (c) Wonder's reply is distrusted → the fallback is tried, and its
+  // trusted reply is what sources the estimate.
+  {
+    const { chat, calls } = recordingChat(["no boxes here", goodBoxes]);
+    const r = await estimateBoxes(p1buf, "intent", chat);
+    assert.strictEqual(r.status, "ok");
+    assert.strictEqual(r.model, "muse-spark-1.3-contributor");
+    assert.strictEqual(calls.length, 2);
+    ok("model fallback (c): Wonder reply distrusted → contributor used");
+  }
+
+  // (d) Both fail → the existing honest behaviour: a distrusted pair
+  // throws "not trusted"; a failed pair surfaces the call error. No
+  // verdict is ever built on either.
+  {
+    const bothGarbage = recordingChat(["junk", "also junk"]);
+    await assert.rejects(() => estimateBoxes(p1buf, "intent", bothGarbage.chat), /not trusted/);
+    assert.strictEqual(bothGarbage.calls.length, 2, "the fallback was tried before giving up");
+    const bothDown = recordingChat([http500, new Error("Model API chat call failed with HTTP 503.")]);
+    await assert.rejects(() => estimateBoxes(p1buf, "intent", bothDown.chat), /HTTP 503/, "the fallback attempt's error is the one reported");
+    ok("model fallback (d): both models fail → the existing uncertain behaviour, nothing guessed");
+  }
+
+  // Calls off is not a fallback trigger: the switch gates every model,
+  // so the disabled status returns after a single attempt.
+  {
+    const { chat, calls } = recordingChat([new ModelCallsDisabled()]);
+    const r = await estimateBoxes(p1buf, "intent", chat);
+    assert.strictEqual(r.status, "disabled");
+    assert.strictEqual(calls.length, 1, "no fallback attempt when calls are switched off");
+    ok("model fallback: calls off propagates at once — the switch gates both models");
+  }
+
+  // The same semantics in the semantic pipeline: Wonder distrusted →
+  // contributor's verdicts are used and the model is named; both
+  // distrusted → model-unreadable; both failing → model-error.
+  {
+    const semFallback = recordingChat(["not json", good]);
+    const sem = await runSemanticChecks(p1buf, "intent", semFallback.chat);
+    assert.strictEqual(sem.source, "model");
+    assert.strictEqual(sem.model, "muse-spark-1.3-contributor");
+    assert.strictEqual(sem.text.verdict, "fix", "the contributor reply's verdicts are the ones used");
+    const semUnreadable = await runSemanticChecks(p1buf, "intent", recordingChat(["junk", "junk"]).chat);
+    assert.strictEqual(semUnreadable.source, "model-unreadable");
+    assert.strictEqual(semUnreadable.text.verdict, "uncertain");
+    const semError = await runSemanticChecks(p1buf, "intent", recordingChat([http500, http500]).chat);
+    assert.strictEqual(semError.source, "model-error");
+    assert.strictEqual(semError.text.verdict, "uncertain");
+    const semPrimary = await runSemanticChecks(p1buf, "intent", recordingChat([good]).chat);
+    assert.strictEqual(semPrimary.model, "muse-wonder-1.0");
+    ok("model fallback: semantic checks share the order — Wonder, contributor, then honest uncertainty");
+  }
+
+  // And in the described-audio draft: Wonder distrusted → the
+  // contributor draft is used; both distrusted → the recorded-facts
+  // draft, exactly as before the tier change.
+  {
+    const script = JSON.stringify({ segments: [{ start: 0, end: 15, text: "The creator stands before a banner." }] });
+    const daFallback = await buildDescribedAudio(v2take, v2sidecar, null, recordingChat(["junk", script]).chat);
+    assert.strictEqual(daFallback.source, "model", "the contributor draft is used when Wonder's is distrusted");
+    const daBothBad = await buildDescribedAudio(v2take, v2sidecar, null, recordingChat(["junk", "junk"]).chat);
+    assert.strictEqual(daBothBad.source, "recorded-facts");
+    ok("model fallback: described audio shares the order, recorded-facts draft last");
+  }
 
   console.log(`\n${passed} test groups passed.`);
 }
