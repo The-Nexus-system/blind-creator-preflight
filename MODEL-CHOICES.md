@@ -164,11 +164,25 @@ on offer.
 Ruling (the Nexus System, Xander): the judgement tier runs Muse Wonder as
 the primary model, with Muse Spark 1.3-contributor as its fallback, and
 the contributor tier's training permission is accepted for this test
-("let him train on our media"). The product tier shape decided the same
-evening — free on the contributor model, a no-training free route on Spark
-1.3 Standard with usage limits, premium on Wonder at about $5/month — is
-recorded in the project's product notes (PRODUCT-TIERS.md in the hackathon
-folder), not in this build.
+("let him train on our media").
+
+The product shape this pricing buys, decided the same evening: the free
+tier runs on Muse Spark 1.3-contributor ($0.10 input / $0.20 output per
+million tokens — the cheapest model measured here, priced that way because
+Meta may train on what is sent to it). A creator who declines training is
+routed instead to Muse Spark 1.3 Standard ($1.25 / $4.25) — the cheapest
+model that never trains, and one whose verdicts in these tests matched the
+designed outcomes throughout — with usage limits, because a no-training
+free user costs roughly twelve to twenty times more per check. The premium
+tier, at about $5 a month, runs on Muse Wonder ($4.00 / $20.00): on the
+per-check cost model above, a photo's model work costs about 2.8 cents on
+Wonder against about 0.7 cents on Spark Standard, so a creator checking a
+few posts a day costs roughly $1–2 a month against the $5 — the margin is
+real but not lavish, and the profile that can break it is heavy daily
+video, whose cost is driven by per-frame segmentation billing rather than
+by the judgement model. The price was set for the audience — blind creators
+count every dollar — with accuracy, not margin, as the premium tier's
+selling point.
 
 Implemented the same evening (commit 38b8193): a single shared wrap in
 server/model-api.js sends every judgement call (box estimation, semantic
