@@ -96,6 +96,18 @@ is a rule — whether a text or private region belongs in the crop check's
 protected set — not a model error and not a conflict between the estimate and
 the record.
 
+Ruling (the Nexus System, Nov 1, 2026): Option A — a private item does NOT
+belong in the crop check's protected set. Crop safety protects the subject
+and text the creator means to show; a private item's protection is the
+privacy warning and the removal repair. Implemented the same night (commit
+fd8f580): a guard drops any located or estimated "sign" that substantially
+overlaps the recorded (or, for an upload, the located) private region, on
+every locating tier and on the video judgement path, and the judgement
+prompt no longer treats documents, letters, or cards as signage. Verified
+live: ST-P8's crop now settles from its subject (pass), its warning still
+fires, and its removal repair is still offered; ST-V2's banner remains
+protected and its designed verdicts are unchanged.
+
 Ruling (the Nexus System, Oct 30): the fallback order is SAM's measurement
 first, then Muse Spark's judgement, then the recorded facts last.
 
