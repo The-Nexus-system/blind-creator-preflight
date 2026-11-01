@@ -40,7 +40,8 @@ const { CHECKS } = require("./seed-takes");
 const { measureImage } = require("./measure");
 const { resolvePhotoBoxes } = require("./sam");
 const { runSemanticChecks } = require("./semantic");
-const { availableRepairs, applyRepair } = require("./repair");
+const { estimatePrivateRegion } = require("./judge");
+const { availableRepairs, applyRepair, REDACT_REPAIR_ID } = require("./repair");
 const { buildUploadProofCopy, draftUploadAltText, readiness } = require("./copy");
 
 // 15 MB, enforced while the body is read — see readBodyWithCap. The
@@ -56,7 +57,7 @@ const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 const SESSION_ID_PATTERN = /^[a-f0-9]{32}$/;
 // The repair ids server/repair.js can apply — the only elements a
 // variant chain may contain, here as in the takes' media route.
-const REPAIR_IDS = ["reframe-margin", "reframe-fit-crops", "brightness-auto", "cover-frame-hands-up"];
+const REPAIR_IDS = ["reframe-margin", "reframe-fit-crops", "brightness-auto", "cover-frame-hands-up", REDACT_REPAIR_ID];
 const CHAIN_SEP = "~";
 
 // The intent the pipelines are handed for a supplied photo: plainly
@@ -214,6 +215,31 @@ async function runUploadChecks(buffer, deps = {}) {
     source: sem.source,
   });
 
+  // When the privacy warning fires on a supplied photo, the judgement
+  // tier is also asked to locate the private item, so the warning has
+  // an action: the redaction repair. The estimate is held to the same
+  // strict parsing as every judgement reply; a region that cannot be
+  // located — the model says so, its reply cannot be trusted, or the
+  // call fails — leaves privacyRegion null, no redaction is offered,
+  // and the client says plainly that the app can tell private
+  // information is present but cannot locate it precisely enough to
+  // take it off automatically. deps.regionEstimator is injectable for
+  // the offline tests; production asks server/judge.js's estimator on
+  // the same chat route the semantic checks used.
+  let privacyRegion = null;
+  if (sem.privacyWarning) {
+    try {
+      const estimate = deps.regionEstimator
+        ? await deps.regionEstimator(buffer, sem.privacyWarning.name)
+        : await estimatePrivateRegion(buffer, sem.privacyWarning.name, deps.chat);
+      if (estimate && estimate.status === "ok" && estimate.region) {
+        privacyRegion = estimate.region;
+      }
+    } catch {
+      privacyRegion = null;
+    }
+  }
+
   const checks = CHECKS.map((c) => byId[c.id]);
   const allSettled = checks.every((c) =>
     ["measured", "sam", "judgement", "model", "determined"].includes(c.source)
@@ -239,6 +265,8 @@ async function runUploadChecks(buffer, deps = {}) {
     checks,
     privacyWarning: sem.privacyWarning,
     privacyWarningSource: sem.privacyWarningSource,
+    privacyRegion,
+    privacyRedactionOffered: Boolean(sem.privacyWarning && privacyRegion),
   };
   return { result, boxes, measurement };
 }
@@ -365,8 +393,11 @@ async function createUploadSession(buffer, deps = {}) {
 // simply never become offered (their verdicts read uncertain), while
 // the pixel-based exposure repair still can be.
 async function listSessionRepairs(sessionId, variant, deps = {}) {
-  const { measurement, boxes } = await runSessionChecks(sessionId, variant || null, deps);
-  const repairs = availableRepairs(measurement, boxes || {}, { chain: chainOf(variant || undefined) });
+  const { result, measurement, boxes } = await runSessionChecks(sessionId, variant || null, deps);
+  const repairs = availableRepairs(measurement, boxes || {}, {
+    chain: chainOf(variant || undefined),
+    privacy: { active: Boolean(result.privacyWarning), region: result.privacyRegion || null },
+  });
   return { repairs, variant: variant || null };
 }
 
@@ -381,13 +412,23 @@ async function applySessionRepair(sessionId, repairId, baseVariant, deps = {}) {
   if (!isValidVariantChain(baseVariant)) throw httpError(400, "Unknown variant.");
   const base = baseVariant || null;
   const before = await runSessionChecks(sessionId, base, deps);
-  const offered = availableRepairs(before.measurement, before.boxes || {}, { chain: chainOf(base || undefined) });
+  const offered = availableRepairs(before.measurement, before.boxes || {}, {
+    chain: chainOf(base || undefined),
+    privacy: { active: Boolean(before.result.privacyWarning), region: before.result.privacyRegion || null },
+  });
   const entry = offered.find((r) => r.id === repairId);
   if (!entry) {
     throw httpError(400, `Repair ${repairId} is not offered for this photo's current verdicts.`);
   }
   const baseBuffer = await readSessionBuffer(sessionId, base);
-  const out = await applyRepair(baseBuffer, before.boxes, repairId, before.measurement);
+  // The redaction paints over the region the current check located,
+  // which lives on the check result rather than among the located
+  // subject/sign boxes; hand it to the repair as the private item.
+  const repairGroundTruth =
+    repairId === REDACT_REPAIR_ID
+      ? { ...(before.boxes || {}), privateItem: before.result.privacyRegion || null }
+      : before.boxes;
+  const out = await applyRepair(baseBuffer, repairGroundTruth, repairId, before.measurement);
   const resultVariant = base ? `${base}${CHAIN_SEP}${repairId}` : repairId;
   const dir = sessionDirPath(sessionId);
   await fs.promises.writeFile(path.join(dir, `${resultVariant}.png`), out.buffer);
@@ -399,19 +440,34 @@ async function applySessionRepair(sessionId, repairId, baseVariant, deps = {}) {
   );
   const after = await runSessionChecks(sessionId, resultVariant, deps);
   const rank = { fix: 0, uncertain: 1, pass: 2 };
-  const beforeCheck = before.result.checks.find((c) => c.id === entry.fixesCheck);
-  const afterCheck = after.result.checks.find((c) => c.id === entry.fixesCheck);
+  // The redaction's outcome is measured on the privacy warning itself —
+  // showing before, clear after — in the same before/after shape as
+  // every other repair's verdict outcome. It counts as improved only
+  // when the re-run privacy check can no longer read the information.
   const outcome =
-    beforeCheck && afterCheck
+    entry.fixesCheck === "privacy"
       ? {
-          checkId: entry.fixesCheck,
-          checkName: beforeCheck.name,
-          before: beforeCheck.verdict,
-          after: afterCheck.verdict,
-          improved: rank[afterCheck.verdict] > rank[beforeCheck.verdict],
-          worse: rank[afterCheck.verdict] < rank[beforeCheck.verdict],
+          checkId: "privacy",
+          checkName: "Private-information warning",
+          before: before.result.privacyWarning ? "showing" : "clear",
+          after: after.result.privacyWarning ? "showing" : "clear",
+          improved: Boolean(before.result.privacyWarning) && !after.result.privacyWarning,
+          worse: !before.result.privacyWarning && Boolean(after.result.privacyWarning),
         }
-      : null;
+      : (() => {
+          const beforeCheck = before.result.checks.find((c) => c.id === entry.fixesCheck);
+          const afterCheck = after.result.checks.find((c) => c.id === entry.fixesCheck);
+          return beforeCheck && afterCheck
+            ? {
+                checkId: entry.fixesCheck,
+                checkName: beforeCheck.name,
+                before: beforeCheck.verdict,
+                after: afterCheck.verdict,
+                improved: rank[afterCheck.verdict] > rank[beforeCheck.verdict],
+                worse: rank[afterCheck.verdict] < rank[beforeCheck.verdict],
+              }
+            : null;
+        })();
   return { variantId: resultVariant, changes: out.changes, outcome, result: after.result };
 }
 

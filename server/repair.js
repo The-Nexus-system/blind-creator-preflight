@@ -125,11 +125,24 @@ function composeTransforms(t1, t2) {
   };
 }
 
+// The privacy redaction repair's id. It is offered from the check
+// result, not from a verdict: when a take's private-information
+// warning is active and the private item's region is located (a
+// seeded take's recorded facts, or the judgement tier's estimate for
+// a supplied photo), this repair paints a solid opaque cover over
+// that region. It is deterministic — no model edits the picture —
+// and it only counts as done when the re-check that follows it can
+// no longer read the private information.
+const REDACT_REPAIR_ID = "take-off-private-information";
+
 // Which repairs apply, given a measurement of the original take. The
 // optional context carries what the measurement cannot say: the take's
 // kind, and for a video with a hands-up window, the moment a cover-frame
 // choice would land on (the repairs endpoint derives both from the take
-// and its sidecar).
+// and its sidecar). The context also carries the privacy state the
+// repair endpoints derive from the current check result:
+// { active, region } — the warning is showing, and the box of the
+// private item it names, in source pixels.
 function availableRepairs(measurement, groundTruth, context) {
   const repairs = [];
   const isVideo = Boolean(context && context.kind === "video");
@@ -172,6 +185,13 @@ function availableRepairs(measurement, groundTruth, context) {
       id: "cover-frame-hands-up",
       name: `Cover frame: use the moment at ${Math.round(context.coverFrameAtSeconds)} seconds, where your hands are up signing`,
       fixesCheck: "firstImpression",
+    });
+  }
+  if (context && context.privacy && context.privacy.active && context.privacy.region) {
+    repairs.push({
+      id: REDACT_REPAIR_ID,
+      name: "Take off private information: paints a solid, opaque cover over the private item the warning names, so it cannot be read, then runs the checks again",
+      fixesCheck: "privacy",
     });
   }
   // A chain never offers a repair it already contains: directing the
@@ -258,6 +278,39 @@ async function applyRepair(buffer, groundTruth, repairId, measurement) {
     };
   }
 
+  if (repairId === REDACT_REPAIR_ID) {
+    // The cover: a solid opaque rectangle over the private item's
+    // located region, with a small margin on every side so a slightly
+    // loose box cannot leave an edge of the item readable. Nothing is
+    // redrawn or invented underneath — the information is hidden, and
+    // the original take is never touched (repairs work on copies).
+    // The boxes are carried forward unchanged: the cover moves no
+    // content, so the re-check measures the same geometry — and the
+    // privacy re-check is what decides whether the cover worked.
+    const region = groundTruth && groundTruth.privateItem;
+    if (!region) {
+      throw new Error("There is no located private item to cover in this take.");
+    }
+    const img = await Jimp.fromBuffer(buffer);
+    const { width, height } = img.bitmap;
+    const pad = Math.max(4, Math.round(Math.min(width, height) * 0.02));
+    const x0 = Math.max(0, Math.floor(region.x0) - pad);
+    const y0 = Math.max(0, Math.floor(region.y0) - pad);
+    const x1 = Math.min(width, Math.ceil(region.x1) + pad);
+    const y1 = Math.min(height, Math.ceil(region.y1) + pad);
+    const cover = new Jimp({ width: x1 - x0, height: y1 - y0, color: 0x000000ff });
+    img.composite(cover, x0, y0);
+    return {
+      buffer: await img.getBuffer("image/png"),
+      groundTruth,
+      changes: [
+        `Painted a solid, opaque cover over the private item's region: pixels ${x0} to ${x1} across and ${y0} to ${y1} down of the ${width} by ${height} frame, a ${pad}-pixel margin included on every side.`,
+        "Nothing was redrawn, described, or invented underneath the cover — the information is hidden, not replaced. The original take is unchanged.",
+        "The checks run again on the covered picture: this repair counts only if the privacy check can no longer read what was there.",
+      ],
+    };
+  }
+
   throw new Error(`Unknown repair id: ${repairId}`);
 }
 
@@ -275,4 +328,4 @@ async function applyGain(buffer, gain) {
   return img.getBuffer("image/png");
 }
 
-module.exports = { availableRepairs, applyRepair, applyTransform, composeTransforms, safeArea, unionBox, applyGain };
+module.exports = { availableRepairs, applyRepair, applyTransform, composeTransforms, safeArea, unionBox, applyGain, REDACT_REPAIR_ID };

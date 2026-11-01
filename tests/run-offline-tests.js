@@ -998,6 +998,184 @@ const { sweep } = require("../server/library");
     ok("upload session: the two-hour sweep deletes stale sessions and keeps fresh ones");
   }
 
+  // 19. Privacy redaction (Nexus order, Nov 1, 2026): the privacy
+  // warning must have an action, not just words. The repair paints an
+  // opaque cover over the located private region; it is offered only
+  // while the warning is active and a region is known; and it counts
+  // only when the re-check can no longer read the information.
+  const { REDACT_REPAIR_ID } = require("../server/repair");
+  const { estimatePrivateRegion, parsePrivateRegion } = require("../server/judge");
+  const p8buf = fs.readFileSync(path.join(mediaDir, "ST-P8.png"));
+  const p8gt = JSON.parse(fs.readFileSync(path.join(mediaDir, "ST-P8.json"), "utf8"));
+  const p8m = await measureImage(p8buf, p8gt);
+  assert(
+    availableRepairs(p8m, p8gt, { privacy: { active: true, region: p8gt.privateItem } }).some((r) => r.id === REDACT_REPAIR_ID),
+    "an active warning with a located region offers the redaction"
+  );
+  assert(
+    !availableRepairs(p8m, p8gt, { privacy: { active: false, region: p8gt.privateItem } }).some((r) => r.id === REDACT_REPAIR_ID),
+    "no warning, no redaction offer"
+  );
+  assert(
+    !availableRepairs(p8m, p8gt, { privacy: { active: true, region: null } }).some((r) => r.id === REDACT_REPAIR_ID),
+    "a warning without a located region offers nothing"
+  );
+  assert(
+    !availableRepairs(p8m, p8gt, { chain: [REDACT_REPAIR_ID], privacy: { active: true, region: p8gt.privateItem } }).some((r) => r.id === REDACT_REPAIR_ID),
+    "a chain never re-offers the redaction it already contains"
+  );
+  ok("redaction: offered only while the warning is active, a region is located, and the chain lacks it");
+
+  const p8redacted = await applyRepair(p8buf, p8gt, REDACT_REPAIR_ID, p8m);
+  const p8img = await Jimp.fromBuffer(p8redacted.buffer);
+  assert.strictEqual(p8img.getPixelColor(825, 875), 0x000000ff, "the private region is under an opaque black cover");
+  const p8orig = await Jimp.fromBuffer(p8buf);
+  assert.strictEqual(p8img.getPixelColor(10, 10), p8orig.getPixelColor(10, 10), "outside the cover, the picture is untouched");
+  assert.deepStrictEqual(p8redacted.groundTruth.privateItem, p8gt.privateItem, "the record of the region is carried forward");
+  assert(p8redacted.changes.length >= 2, "the repair describes what changed in measurable terms");
+  ok("redaction: the cover is opaque over the region and nothing else changes");
+
+  const p8stacked = await applyRepair(
+    p8redacted.buffer,
+    p8redacted.groundTruth,
+    "reframe-margin",
+    await measureImage(p8redacted.buffer, p8redacted.groundTruth)
+  );
+  const stackedImg = await Jimp.fromBuffer(p8stacked.buffer);
+  const st = p8stacked.groundTruth.privateItem;
+  assert.strictEqual(
+    stackedImg.getPixelColor(Math.round((st.x0 + st.x1) / 2), Math.round((st.y0 + st.y1) / 2)),
+    0x000000ff,
+    "the cover survives stacking under a reframe"
+  );
+  ok("redaction: stacks with another repair without breaking the chain");
+
+  assert.deepStrictEqual(
+    parsePrivateRegion(JSON.stringify({ privateItem: { x0: 1, y0: 2, x1: 30, y1: 40 } }), 100, 100),
+    { region: { x0: 1, y0: 2, x1: 30, y1: 40 } }
+  );
+  assert.deepStrictEqual(
+    parsePrivateRegion(JSON.stringify({ privateItem: null }), 100, 100),
+    { region: null },
+    "the model may say the item cannot be located — a trusted answer, not a failure"
+  );
+  assert.strictEqual(
+    parsePrivateRegion(JSON.stringify({ privateItem: { x0: 0, y0: 0, x1: 500, y1: 40 } }), 100, 100),
+    null,
+    "an out-of-range region is distrusted"
+  );
+  assert.strictEqual(parsePrivateRegion("no json", 100, 100), null);
+  const estOk = await estimatePrivateRegion(p1buf, "A readable home address on a letter.", async () =>
+    JSON.stringify({ privateItem: { x0: 10, y0: 10, x1: 100, y1: 100 } })
+  );
+  assert.strictEqual(estOk.status, "ok");
+  assert.deepStrictEqual(estOk.region, { x0: 10, y0: 10, x1: 100, y1: 100 });
+  await assert.rejects(
+    () => estimatePrivateRegion(p1buf, "x", async () => "garbage"),
+    /not trusted/,
+    "an unreadable region reply throws rather than returning a box"
+  );
+  ok("redaction: the region estimate is parsed with the same distrust as every judgement reply");
+
+  // The upload session, end to end over HTTP: a firing warning with a
+  // located region offers the redaction; applying it clears the
+  // warning on the re-check, reported in the before/after pattern.
+  // The semantic stub fires for the original's checks (creation, the
+  // repairs listing, the repair's own before-check) and clears for
+  // the re-check of the covered picture.
+  const firingReply = JSON.stringify({
+    text: { verdict: "pass", detail: "No text." },
+    firstImpression: { verdict: "pass", detail: "A person at a desk." },
+    privacy: { fires: true, name: "A readable home address on a letter.", detail: "Posting would make the address public." },
+  });
+  const clearReply = JSON.stringify({
+    text: { verdict: "pass", detail: "No text." },
+    firstImpression: { verdict: "pass", detail: "A person at a desk." },
+    privacy: { fires: false, name: "", detail: "" },
+  });
+  let semCalls = 0;
+  const privacyChat = async () => (++semCalls <= 3 ? firingReply : clearReply);
+  const regionStub = async () => ({
+    status: "ok",
+    region: { x0: 700, y0: 800, x1: 950, y1: 950 },
+    model: "muse-wonder-1.0",
+  });
+  const privacyHttp = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    if (url.pathname.startsWith("/api/uploads/")) {
+      handleUploadRoutes(req, res, url, { segmenter: uploadSeg, chat: privacyChat, regionEstimator: regionStub }).catch((err) => {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: err.message }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((resolve) => privacyHttp.listen(0, "127.0.0.1", resolve));
+  const prBase = `http://127.0.0.1:${privacyHttp.address().port}`;
+  try {
+    const checkRes = await fetch(`${prBase}/api/uploads/check`, {
+      method: "POST",
+      headers: { "Content-Type": "image/png" },
+      body: p8buf,
+    });
+    assert.strictEqual(checkRes.status, 200);
+    const checkBody = await checkRes.json();
+    const psid = checkBody.sessionId;
+    assert(checkBody.privacyWarning, "the warning fires on the supplied photo");
+    assert.deepStrictEqual(checkBody.privacyRegion, { x0: 700, y0: 800, x1: 950, y1: 950 }, "the region is stored in the check result");
+    assert.strictEqual(checkBody.privacyRedactionOffered, true);
+
+    const repairsRes = await fetch(`${prBase}/api/uploads/${psid}/repairs`);
+    const repairsBody = await repairsRes.json();
+    assert(repairsBody.repairs.some((r) => r.id === REDACT_REPAIR_ID), "the session offers the redaction");
+    ok("redaction (upload): a firing warning with a located region offers the repair");
+
+    const applyRes = await fetch(`${prBase}/api/uploads/${psid}/repair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repairId: REDACT_REPAIR_ID }),
+    });
+    assert.strictEqual(applyRes.status, 200);
+    const applyBody = await applyRes.json();
+    assert.strictEqual(applyBody.variantId, REDACT_REPAIR_ID);
+    assert.strictEqual(applyBody.outcome.checkId, "privacy");
+    assert.strictEqual(applyBody.outcome.checkName, "Private-information warning");
+    assert.strictEqual(applyBody.outcome.before, "showing");
+    assert.strictEqual(applyBody.outcome.after, "clear", "the re-run privacy check can no longer read the information");
+    assert.strictEqual(applyBody.outcome.improved, true);
+    assert.strictEqual(applyBody.result.privacyWarning, null);
+    const variantMedia = await fetch(`${prBase}/api/uploads/${psid}/media?variant=${REDACT_REPAIR_ID}`);
+    assert.strictEqual(variantMedia.status, 200, "the covered variant is served by the session media route");
+    ok("redaction (upload): applied, re-checked clear, and reported in the before/after pattern");
+
+    fs.rmSync(path.join(UPLOAD_TMP_DIR, psid), { recursive: true, force: true });
+  } finally {
+    privacyHttp.close();
+  }
+
+  // A firing warning whose region cannot be located: no offer, and
+  // the client's plain-sentence path exists in the shipped client.
+  const noRegion = await buildUploadChecks(p8buf, {
+    segmenter: uploadSeg,
+    chat: async () => firingReply,
+    regionEstimator: async () => ({ status: "ok", region: null }),
+  });
+  assert(noRegion.privacyWarning, "the warning still fires");
+  assert.strictEqual(noRegion.privacyRegion, null);
+  assert.strictEqual(noRegion.privacyRedactionOffered, false);
+  const clientSrc = fs.readFileSync(path.join(__dirname, "..", "client", "app.js"), "utf8");
+  assert(
+    clientSrc.includes("cannot locate it precisely enough to take it off automatically"),
+    "the client carries the plain no-region sentence"
+  );
+  assert(
+    clientSrc.includes("A repair below can take the private information off this photo."),
+    "the client carries the offered-repair line under the warning"
+  );
+  ok("redaction (upload): a warning without a locatable region offers nothing, and the client says so plainly");
+
   console.log(`\n${passed} test groups passed.`);
 }
 

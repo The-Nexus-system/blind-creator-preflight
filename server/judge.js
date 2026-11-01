@@ -139,4 +139,81 @@ async function estimateBoxes(buffer, intent, chat) {
   return { status: "ok", subject: result.value.subject, sign: result.value.sign, model: result.model };
 }
 
-module.exports = { estimateBoxes, parseBoxes, buildBoxPrompt };
+function buildPrivateRegionPrompt(warningName, width, height) {
+  return [
+    "You are the privacy-region locator inside Blind Creator Pre-Flight, an app a blind creator uses before posting.",
+    `A check of this image found private information in it: ${warningName}`,
+    `The image is ${width} pixels wide and ${height} pixels tall. Coordinates are source pixels, with (0, 0) at the top left.`,
+    "Estimate the bounding box of exactly that private item — the smallest box that covers the private content itself, so a cover can be painted over it. Do not box anything else.",
+    "Answer with ONLY a JSON object, no prose, of exactly this shape:",
+    "{",
+    '  "privateItem": {"x0": 0, "y0": 0, "x1": 0, "y1": 0} or null',
+    "}",
+    "Every coordinate must be a number inside the image: 0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height. If you cannot locate the private item precisely, report null rather than guessing a box — the app will say plainly that it cannot take the information off automatically. If you cannot read the image at all, answer with the single word UNREADABLE.",
+  ].join("\n");
+}
+
+// Strictly parses a private-region reply. Returns { region } — the box,
+// or null when the model itself reports the item cannot be located —
+// and null overall when the reply cannot be trusted.
+function parsePrivateRegion(text, width, height) {
+  if (typeof text !== "string") return null;
+  if (text.trim() === "UNREADABLE") return { region: null };
+  let obj;
+  try {
+    obj = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== "object" || !("privateItem" in obj)) return null;
+  if (obj.privateItem === null) return { region: null };
+  if (!validBox(obj.privateItem, width, height)) return null;
+  return { region: roundBox(obj.privateItem) };
+}
+
+// Asks the judgement tier to locate the private item a privacy warning
+// named, through the same shared fallback and distrust discipline as
+// estimateBoxes. Returns:
+//   { status: "ok", region, model } — region is a trusted box, or null
+//                                     when the model could not locate
+//                                     the item precisely.
+//   { status: "disabled" }          — live calls are off.
+// Throws on a real call failure or an untrusted reply; the caller
+// treats either as "no region" — a warning with no located region
+// offers no redaction, and the app says so plainly.
+async function estimatePrivateRegion(buffer, warningName, chat) {
+  const img = await Jimp.fromBuffer(buffer);
+  const { width, height } = img.bitmap;
+  let result;
+  try {
+    result = await chatJudgement({
+      chat,
+      validate: (text) => parsePrivateRegion(text, width, height),
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: buildPrivateRegionPrompt(warningName, width, height) },
+            {
+              type: "image_url",
+              image_url: { url: `data:image/png;base64,${buffer.toString("base64")}` },
+            },
+          ],
+        },
+      ],
+    });
+  } catch (err) {
+    if (err instanceof ModelCallsDisabled || (err && err.code === "MODEL_CALLS_DISABLED")) {
+      return { status: "disabled" };
+    }
+    if (err instanceof ModelReplyUntrusted || (err && err.code === "MODEL_REPLY_UNTRUSTED")) {
+      throw new Error(
+        "The model reply could not be read as the required box shape, so it is not trusted."
+      );
+    }
+    throw err;
+  }
+  return { status: "ok", region: result.value.region, model: result.model };
+}
+
+module.exports = { estimateBoxes, parseBoxes, buildBoxPrompt, estimatePrivateRegion, parsePrivateRegion, buildPrivateRegionPrompt };

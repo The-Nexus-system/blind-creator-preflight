@@ -37,7 +37,7 @@ const { runAudioCheck } = require("./audio");
 const { buildDescribedAudio } = require("./narrate");
 const { handleUploadRoutes } = require("./upload");
 const { buildProofCopy, draftAltText, readiness, buildPublicDescription } = require("./copy");
-const { availableRepairs, applyRepair, applyTransform, composeTransforms } = require("./repair");
+const { availableRepairs, applyRepair, applyTransform, composeTransforms, REDACT_REPAIR_ID } = require("./repair");
 const { sweep } = require("./library");
 
 const MEDIA_DIR = path.join(__dirname, "seed-media");
@@ -522,10 +522,31 @@ async function buildChecks(take, variantId) {
 
   // The designed privacy warning exercises the warning path only while the
   // model check has not run; a live model answer replaces it entirely.
-  if (!privacyWarning && privacyWarningSource === "model-off" && take.designedPrivacyWarning) {
+  // It also describes the ORIGINAL take's state: a variant whose chain
+  // includes the redaction repair has deterministically covered the
+  // private region, so the designed warning does not fire for it — that
+  // is the same state the live model's re-check reports on such a
+  // variant, and with live calls on this stand-in never runs at all.
+  if (
+    !privacyWarning &&
+    privacyWarningSource === "model-off" &&
+    take.designedPrivacyWarning &&
+    !chainOf(variantId).includes(REDACT_REPAIR_ID)
+  ) {
     privacyWarning = take.designedPrivacyWarning;
     privacyWarningSource = "designed";
   }
+
+  // The redaction repair's facts, stated on the result so the client
+  // can say what the warning offers: the private item's region from
+  // the take's record (transformed into the current variant's
+  // geometry by the repairs that produced it), and whether the
+  // redaction is offered for this variant — warning active, region
+  // known, and the chain does not already contain the repair.
+  const privacyRegion = media && media.groundTruth ? media.groundTruth.privateItem || null : null;
+  const privacyRedactionOffered = Boolean(
+    privacyWarning && privacyRegion && !chainOf(variantId).includes(REDACT_REPAIR_ID)
+  );
 
   const checks = CHECKS.map((c) => byId[c.id]);
   const allSettled = checks.every((c) => ["measured", "sam", "judgement", "model", "determined"].includes(c.source));
@@ -540,6 +561,8 @@ async function buildChecks(take, variantId) {
     checks,
     privacyWarning,
     privacyWarningSource,
+    privacyRegion,
+    privacyRedactionOffered,
   };
 }
 
@@ -607,10 +630,21 @@ const server = http.createServer((req, res) => {
         take.kind === "video" ? await resolveVideoMedia(take, variantId) : resolveMedia(take, variantId);
       if (!media || !media.groundTruth) return sendJson(res, 200, { repairs: [] });
       const m = await measureTake(take, variantId);
-      const context =
-        take.kind === "video"
-          ? videoRepairContext(take, media.sidecar, variantId)
-          : { chain: chainOf(variantId) };
+      let context;
+      if (take.kind === "video") {
+        context = videoRepairContext(take, media.sidecar, variantId);
+      } else {
+        // The redaction offer depends on the current variant's warning
+        // state, which only the check pipeline knows — ask it.
+        const checksNow = await buildChecks(take, variantId);
+        context = {
+          chain: chainOf(variantId),
+          privacy: {
+            active: Boolean(checksNow.privacyWarning),
+            region: media.groundTruth.privateItem || null,
+          },
+        };
+      }
       sendJson(res, 200, { repairs: availableRepairs(m, media.groundTruth, context) });
     })().catch((err) => sendJson(res, 500, { error: `Repairs failed: ${err.message}` }));
     return;
@@ -644,10 +678,19 @@ const server = http.createServer((req, res) => {
           return sendJson(res, 400, { error: "This take has no media to repair." });
         }
         const m = await measureTake(take, baseVariant);
-        const context =
-          take.kind === "video"
-            ? videoRepairContext(take, media.sidecar, baseVariant)
-            : { chain: chainOf(baseVariant) };
+        const before = await buildChecks(take, baseVariant);
+        let context;
+        if (take.kind === "video") {
+          context = videoRepairContext(take, media.sidecar, baseVariant);
+        } else {
+          context = {
+            chain: chainOf(baseVariant),
+            privacy: {
+              active: Boolean(before.privacyWarning),
+              region: media.groundTruth.privateItem || null,
+            },
+          };
+        }
         const offeredList = availableRepairs(m, media.groundTruth, context);
         const offered = offeredList.map((r) => r.id);
         if (!offered.includes(input.repairId)) {
@@ -752,22 +795,38 @@ const server = http.createServer((req, res) => {
         audioCache.delete(`${take.id}|${resultVariantId}`);
         describedCache.delete(`${take.id}|${resultVariantId}`);
         const result = await buildChecks(take, resultVariantId);
-        const before = await buildChecks(take, baseVariant);
         const targetId = (offeredList.find((r) => r.id === input.repairId) || {}).fixesCheck;
         const rank = { fix: 0, uncertain: 1, pass: 2 };
-        const beforeCheck = before.checks.find((c) => c.id === targetId);
-        const afterCheck = result.checks.find((c) => c.id === targetId);
-        const outcome =
-          beforeCheck && afterCheck
-            ? {
-                checkId: targetId,
-                checkName: beforeCheck.name,
-                before: beforeCheck.verdict,
-                after: afterCheck.verdict,
-                improved: rank[afterCheck.verdict] > rank[beforeCheck.verdict],
-                worse: rank[afterCheck.verdict] < rank[beforeCheck.verdict],
-              }
-            : null;
+        // The redaction's outcome is measured on the privacy warning
+        // itself — showing before, clear after — in the same
+        // before/after shape as every other repair's verdict outcome.
+        // It counts as improved only when the re-run privacy check can
+        // no longer read the private information.
+        let outcome = null;
+        if (targetId === "privacy") {
+          outcome = {
+            checkId: "privacy",
+            checkName: "Private-information warning",
+            before: before.privacyWarning ? "showing" : "clear",
+            after: result.privacyWarning ? "showing" : "clear",
+            improved: Boolean(before.privacyWarning) && !result.privacyWarning,
+            worse: !before.privacyWarning && Boolean(result.privacyWarning),
+          };
+        } else {
+          const beforeCheck = before.checks.find((c) => c.id === targetId);
+          const afterCheck = result.checks.find((c) => c.id === targetId);
+          outcome =
+            beforeCheck && afterCheck
+              ? {
+                  checkId: targetId,
+                  checkName: beforeCheck.name,
+                  before: beforeCheck.verdict,
+                  after: afterCheck.verdict,
+                  improved: rank[afterCheck.verdict] > rank[beforeCheck.verdict],
+                  worse: rank[afterCheck.verdict] < rank[beforeCheck.verdict],
+                }
+              : null;
+        }
         sendJson(res, 200, { variantId: resultVariantId, changes, outcome, result });
       })().catch((err) => sendJson(res, 500, { error: `Repair failed: ${err.message}` }));
     });
@@ -887,7 +946,7 @@ const server = http.createServer((req, res) => {
     const take = TAKES.find((t) => t.id === mediaMatch[1]);
     if (!take) return sendJson(res, 404, { error: "Unknown take id." });
     const variantId = url.searchParams.get("variant") || undefined;
-    const REPAIR_IDS = ["reframe-margin", "reframe-fit-crops", "brightness-auto", COVER_REPAIR_ID];
+    const REPAIR_IDS = ["reframe-margin", "reframe-fit-crops", "brightness-auto", COVER_REPAIR_ID, REDACT_REPAIR_ID];
     if (variantId && !chainOf(variantId).every((id) => REPAIR_IDS.includes(id))) {
       return sendJson(res, 400, { error: "Unknown variant." });
     }
