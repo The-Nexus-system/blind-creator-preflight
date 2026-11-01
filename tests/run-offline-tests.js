@@ -1176,6 +1176,19 @@ const { sweep } = require("../server/library");
   );
   ok("redaction (upload): a warning without a locatable region offers nothing, and the client says so plainly");
 
+  // Described-audio playback wiring (Nexus decision, Nov 1, 2026):
+  // the device-voice playback exists in the shipped client, labelled
+  // as the device's own voice, with the no-synthesis sentence path
+  // and a stop on take switch. Hearing it is a real-device check;
+  // what is asserted here is that the code path is served.
+  assert(clientSrc.includes("speechSynthesis"), "the client wires the browser's speech synthesis");
+  assert(clientSrc.includes('"Play description"') && clientSrc.includes('"Stop"'), "playback controls carry the short labels");
+  assert(clientSrc.includes("this device's own voice"), "the playback explanation names the device's own voice before the controls");
+  assert(clientSrc.includes("not a Meta model and not a recorded narration"), "and states plainly what the voice is not");
+  assert(clientSrc.includes("Playback is not available in this browser"), "the no-synthesis path is a sentence, not a dead button");
+  assert(clientSrc.includes("stopDescriptionPlayback"), "playback stops when the take's unit is rebuilt");
+  ok("described audio playback: device-voice wiring, honest labelling, and the no-synthesis path are in the client");
+
   console.log(`\n${passed} test groups passed.`);
 }
 

@@ -120,6 +120,7 @@ function renderResults(take, data) {
 }
 
 async function runCheck(take) {
+  stopDescriptionPlayback();
   session = { take, variant: null, warningAcknowledged: false, altTextApproved: false, describedApproved: false };
   composerStatusEl.textContent = `Checking ${take.id}: ${take.title}.`;
   resultsEl.replaceChildren(el("p", "Running the six checks…"));
@@ -408,6 +409,14 @@ async function loadPublicDescription(take, checkData) {
 
 const describedAreaEl = document.getElementById("described-area");
 
+// Stops any device-voice playback of the description. Called whenever
+// the take's unit is rebuilt — a new check, a repair, a different
+// take — so the voice never keeps reading a script that has left the
+// page.
+function stopDescriptionPlayback() {
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+}
+
 function formatSeconds(s) {
   const m = Math.floor(s / 60);
   const sec = Math.round(s % 60);
@@ -415,6 +424,7 @@ function formatSeconds(s) {
 }
 
 async function loadDescribedAudio(take, checkData) {
+  stopDescriptionPlayback();
   if (session) session.describedApproved = false;
   if (take.kind !== "video") {
     describedAreaEl.replaceChildren();
@@ -476,6 +486,62 @@ async function loadDescribedAudio(take, checkData) {
   });
   frag.appendChild(approveBtn);
   frag.appendChild(approveState);
+
+  // Playback of the script with the DEVICE'S OWN voice (Nexus
+  // decision, Nov 1, 2026): the browser's speech synthesis reads the
+  // script's current words — the editor's text, timing labels
+  // stripped — in order. It is not a Meta model and not a recorded
+  // narration, and the explanation before the controls says exactly
+  // that. Where the browser has no speech synthesis there are no
+  // buttons at all — a plain sentence instead, never a dead control.
+  if ("speechSynthesis" in window) {
+    frag.appendChild(
+      el(
+        "p",
+        "You can hear the script read aloud by this device's own voice — the browser's built-in speech, not a Meta model and not a recorded narration. It reads the words exactly as the editor above holds them now."
+      )
+    );
+    const playBtn = el("button", "Play description");
+    playBtn.type = "button";
+    const stopBtn = el("button", "Stop");
+    stopBtn.type = "button";
+    const playState = el("p", "Not playing.");
+    playBtn.addEventListener("click", () => {
+      window.speechSynthesis.cancel();
+      const lines = editor.value
+        .split("\n")
+        .map((line) => line.replace(/^\s*\d+:\d{2}(?:\.\d+)?\s+to\s+\d+:\d{2}(?:\.\d+)?\s*:\s*/, "").trim())
+        .filter((line) => line.length > 0);
+      if (!lines.length) {
+        playState.textContent = "There is no script text to play.";
+        return;
+      }
+      lines.forEach((line, i) => {
+        const utterance = new SpeechSynthesisUtterance(line);
+        if (i === lines.length - 1) {
+          utterance.onend = () => {
+            playState.textContent = "Finished playing the description.";
+          };
+          utterance.onerror = () => {
+            playState.textContent = "Playback stopped.";
+          };
+        }
+        window.speechSynthesis.speak(utterance);
+      });
+      playState.textContent = "Playing the description with this device's voice.";
+    });
+    stopBtn.addEventListener("click", () => {
+      window.speechSynthesis.cancel();
+      playState.textContent = "Playback stopped.";
+    });
+    frag.appendChild(playBtn);
+    frag.appendChild(stopBtn);
+    frag.appendChild(playState);
+  } else {
+    frag.appendChild(
+      el("p", "Playback is not available in this browser: it has no built-in speech voice to read the script aloud.")
+    );
+  }
 
   frag.appendChild(
     el("p", "Take the script away as a plain text file, ready to record or hand to a voice. The file holds the words exactly as the editor holds them when you press the button.")
