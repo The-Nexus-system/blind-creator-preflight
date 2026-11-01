@@ -180,9 +180,13 @@ async function composeCoverFrame(buffer, boxes, baseTransform) {
 
   // Scale the region to the safe area and place it: horizontally the
   // region centres in the safe area; vertically the SUBJECT centres
-  // in the frame (clamped so the picture never leaves the frame).
+  // in the frame (clamped so the picture never leaves the frame). The
+  // fit keeps a small margin inside the safe area — a poster does not
+  // set its picture edge-to-edge against the platform crops, and the
+  // margin is what lets the re-check's own box estimates agree that
+  // the sign survives the crops whole.
   const safe = safeArea(width, height);
-  const scale = Math.min((safe.x1 - safe.x0) / regionW, (safe.y1 - safe.y0) / regionH);
+  const scale = Math.min((safe.x1 - safe.x0) / regionW, (safe.y1 - safe.y0) / regionH) * 0.96;
   const picW = Math.round(regionW * scale);
   const picH = Math.round(regionH * scale);
   const offX = Math.round((safe.x0 + safe.x1) / 2 - picW / 2);
