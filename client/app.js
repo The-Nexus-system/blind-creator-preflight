@@ -78,6 +78,7 @@ function appendWarningActionLines(frag, data) {
 }
 
 function renderResults(take, data) {
+  if (session && session.take === take) session.lastResult = data;
   const frag = document.createDocumentFragment();
   frag.appendChild(el("h3", `${data.take.id}: ${data.take.title}${data.variant ? " (repaired)" : ""}`));
   frag.appendChild(
@@ -172,6 +173,23 @@ async function loadRepairs(take) {
   }
   repairsEl.appendChild(el("p", "Repairs are performed on a copy — the original take is never changed, and you can undo at any time."));
   appendRepairButtons(repairsEl, take, data.repairs);
+  appendUncoveredFixNotes(repairsEl, data.repairs);
+}
+
+// A check can say fix without a deterministic repair existing for it
+// (the repairs are computed from the take's recorded measurement, so
+// a fix that rests on a model estimate may have none). Say so plainly
+// beside the offers rather than leaving the fix unexplained — the
+// same honesty the upload flow applies beside its verdicts.
+function appendUncoveredFixNotes(container, repairs) {
+  const result = session && session.lastResult;
+  if (!result) return;
+  const offeredFor = new Set((repairs || []).map((r) => r.fixesCheck));
+  for (const check of result.checks) {
+    if (check.verdict === "fix" && !offeredFor.has(check.id)) {
+      container.appendChild(el("p", `No deterministic repair is offered for the ${check.name} check.`));
+    }
+  }
 }
 
 async function applyRepair(take, repair) {
@@ -231,8 +249,8 @@ async function applyRepair(take, repair) {
     );
     appendRepairButtons(repairsEl, take, more.repairs);
   }
-
   renderResults(take, data.result);
+  appendUncoveredFixNotes(repairsEl, more.repairs || []);
   loadCopy(take, data.result);
 }
 
