@@ -233,3 +233,19 @@ SAM measures where it can see; Spark judges, drafts, and estimates where SAM
 cannot; Transcribe settles the audio check from words actually recovered; the
 recorded facts stand as the final fallback; and every verdict in the app names
 which of those sources it came from.
+
+## Addendum — Nov 1, 2026: the stacked cover (Decision 2, Option B)
+
+The Nexus ruled Option A (demo arc ends at the reframe) acceptable for the
+hackathon submission and Option B (the stacked reframe → cover chain must
+pass) required for the App Store product; Wren elected B now. The cover-frame
+repair now composes a poster deterministically: the whole picture (subject
+and banner) fitted into the platform safe area at 96%, the subject centred
+vertically, on a canvas filled from the frame's own edge colour (commits
+9f5a653, ff096f0; suite 73/73). No check changed. Verified live on the
+deployed app: the stacked variant passes all six checks on two consecutive
+fresh-chain runs, plus an independent third run by Wren. First impression
+remains a live judgement and this take's borderline check — the crop rule
+(whole banner inside every platform window) caps the figure near 20% of the
+poster's height, so placement was the only honest lever. Full record:
+CLAIM-AUDIT-2026-11-01.md in the project notes.
