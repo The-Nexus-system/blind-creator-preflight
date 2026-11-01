@@ -56,6 +56,27 @@ async function loadTakes() {
   }
 }
 
+// What the creator can do about a showing warning, stated under the
+// warning itself: when the redaction repair is offered for this
+// variant, one line points at it; when the warning fires but no
+// region could be located, one plain sentence says the app cannot
+// take the information off automatically. When a region is known but
+// the redaction is already in the chain, neither line is added — the
+// warning still showing is itself the information.
+function appendWarningActionLines(frag, data) {
+  if (!data.privacyWarning) return;
+  if (data.privacyRedactionOffered) {
+    frag.appendChild(el("p", "A repair below can take the private information off this photo."));
+  } else if (!data.privacyRegion) {
+    frag.appendChild(
+      el(
+        "p",
+        "The app can tell private information is present but cannot locate it precisely enough to take it off automatically."
+      )
+    );
+  }
+}
+
 function renderResults(take, data) {
   const frag = document.createDocumentFragment();
   frag.appendChild(el("h3", `${data.take.id}: ${data.take.title}${data.variant ? " (repaired)" : ""}`));
@@ -84,6 +105,7 @@ function renderResults(take, data) {
     frag.appendChild(el("h3", `Warning — ${data.privacyWarning.name}`));
     frag.appendChild(el("p", data.privacyWarning.detail));
     frag.appendChild(el("p", `Warning source: ${warnSource}.`));
+    appendWarningActionLines(frag, data);
   }
 
   const fixes = data.checks.filter((c) => c.verdict === "fix").length;
@@ -98,10 +120,11 @@ function renderResults(take, data) {
 }
 
 async function runCheck(take) {
-  session = { take, variant: null, warningAcknowledged: false, altTextApproved: false };
+  session = { take, variant: null, warningAcknowledged: false, altTextApproved: false, describedApproved: false };
   composerStatusEl.textContent = `Checking ${take.id}: ${take.title}.`;
   resultsEl.replaceChildren(el("p", "Running the six checks…"));
   repairsEl.replaceChildren();
+  describedAreaEl.replaceChildren();
   shareAreaEl.replaceChildren();
   const res = await fetch(`/api/takes/${take.id}/checks`);
   const data = await res.json();
@@ -112,20 +135,13 @@ async function runCheck(take) {
 
 // --- Repairs ---------------------------------------------------------------
 
-async function loadRepairs(take) {
-  const res = await fetch(`/api/takes/${take.id}/repairs`);
-  const data = await res.json();
-  repairsEl.replaceChildren();
-  if (!data.repairs.length) {
-    repairsEl.appendChild(el("p", "No deterministic repairs are offered for this take's current verdicts."));
-    return;
-  }
-  repairsEl.appendChild(el("p", "Repairs are performed on a copy — the original take is never changed, and you can undo at any time."));
+// One repairs list, rendered the standing way: for each repair, the
+// explanation as text first, then a button carrying the short action
+// name only. Repair names arrive as "Short name: explanation".
+function appendRepairButtons(container, take, repairs) {
   const list = el("ul");
-  for (const repair of data.repairs) {
+  for (const repair of repairs) {
     const li = el("li");
-    // Repair names arrive as "Short name: explanation". The button
-    // carries the short name only; the explanation stands before it.
     const splitAt = repair.name.indexOf(": ");
     const shortName = splitAt > 0 ? repair.name.slice(0, splitAt) : repair.name;
     if (splitAt > 0) {
@@ -140,7 +156,21 @@ async function loadRepairs(take) {
     li.appendChild(button);
     list.appendChild(li);
   }
-  repairsEl.appendChild(list);
+  container.appendChild(list);
+}
+
+async function loadRepairs(take) {
+  const variantQuery =
+    session && session.variant ? `?variant=${encodeURIComponent(session.variant)}` : "";
+  const res = await fetch(`/api/takes/${take.id}/repairs${variantQuery}`);
+  const data = await res.json();
+  repairsEl.replaceChildren();
+  if (!data.repairs.length) {
+    repairsEl.appendChild(el("p", "No deterministic repairs are offered for this take's current verdicts."));
+    return;
+  }
+  repairsEl.appendChild(el("p", "Repairs are performed on a copy — the original take is never changed, and you can undo at any time."));
+  appendRepairButtons(repairsEl, take, data.repairs);
 }
 
 async function applyRepair(take, repair) {
@@ -148,7 +178,10 @@ async function applyRepair(take, repair) {
   const res = await fetch(`/api/takes/${take.id}/repair`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ repairId: repair.id }),
+    body: JSON.stringify({
+      repairId: repair.id,
+      baseVariant: session && session.variant ? session.variant : undefined,
+    }),
   });
   const data = await res.json();
   if (data.error) {
@@ -182,6 +215,21 @@ async function applyRepair(take, repair) {
   undo.type = "button";
   undo.addEventListener("click", () => runCheck(take));
   repairsEl.appendChild(undo);
+
+  // Repairs stack: whatever the repaired take's new verdicts offer is
+  // listed here too, performed on the repaired take when chosen — the
+  // same chain the repair endpoint applies server-side.
+  const moreRes = await fetch(
+    `/api/takes/${take.id}/repairs?variant=${encodeURIComponent(data.variantId)}`
+  );
+  const more = await moreRes.json();
+  if (more.repairs && more.repairs.length) {
+    repairsEl.appendChild(el("h3", "Repairs for the repaired take"));
+    repairsEl.appendChild(
+      el("p", "These are performed on the repaired take you are looking at now, on top of the repair above.")
+    );
+    appendRepairButtons(repairsEl, take, more.repairs);
+  }
 
   renderResults(take, data.result);
   loadCopy(take, data.result);
@@ -287,6 +335,7 @@ async function loadCopy(take, checkData) {
   copyAreaEl.replaceChildren(frag);
   refreshReadiness();
   loadPublicDescription(take, checkData);
+  loadDescribedAudio(take, checkData);
   renderShareArea(take);
 }
 
@@ -343,6 +392,106 @@ async function loadPublicDescription(take, checkData) {
   download.download = `public-description-${take.id}.txt`;
   frag.appendChild(download);
   publicAreaEl.replaceChildren(frag);
+}
+
+// --- Described audio (video takes) -----------------------------------------
+// The described-audio draft script for a video take, inside the take's
+// own unit: the timed segments the server drafted from the take's
+// recorded timeline, then the script as editable text with the same
+// draft/approve rule as the alt text — approval covers the exact
+// current words, and any edit clears it. The script can be taken away
+// as a plain text file: the download is built from the editor's
+// current words when pressed, so what is approved is what is carried
+// away. For a photo take there is no timeline to narrate and this
+// area stays empty; the server says why when a video's script cannot
+// be drafted, and that reason is shown plainly.
+
+const describedAreaEl = document.getElementById("described-area");
+
+function formatSeconds(s) {
+  const m = Math.floor(s / 60);
+  const sec = Math.round(s % 60);
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+async function loadDescribedAudio(take, checkData) {
+  if (session) session.describedApproved = false;
+  if (take.kind !== "video") {
+    describedAreaEl.replaceChildren();
+    return;
+  }
+  describedAreaEl.replaceChildren(el("p", "Drafting the described-audio script…"));
+  const variantQuery = checkData.variant ? `?variant=${encodeURIComponent(checkData.variant)}` : "";
+  const res = await fetch(`/api/takes/${take.id}/described-audio${variantQuery}`);
+  const data = await res.json();
+  const da = data.describedAudio;
+
+  const frag = document.createDocumentFragment();
+  frag.appendChild(el("h3", "Described audio — draft script"));
+  if (!da || !da.available) {
+    frag.appendChild(
+      el("p", da && da.reason ? da.reason : "No described-audio script can be drafted for this take.")
+    );
+    describedAreaEl.replaceChildren(frag);
+    return;
+  }
+  frag.appendChild(el("p", da.note));
+  frag.appendChild(
+    el(
+      "p",
+      da.source === "model"
+        ? "Draft source: drafted by the model check from the take's recorded timeline."
+        : "Draft source: assembled from the take's recorded facts."
+    )
+  );
+  const list = el("ul");
+  for (const seg of da.segments) {
+    list.appendChild(el("li", `${formatSeconds(seg.start)} to ${formatSeconds(seg.end)}: ${seg.text}`));
+  }
+  frag.appendChild(list);
+
+  const label = el("label", "Described-audio script — edit it into your own words:");
+  label.htmlFor = "described-editor";
+  frag.appendChild(label);
+  const editor = document.createElement("textarea");
+  editor.id = "described-editor";
+  editor.rows = 6;
+  editor.cols = 60;
+  editor.value = da.segments
+    .map((s) => `${formatSeconds(s.start)} to ${formatSeconds(s.end)}: ${s.text}`)
+    .join("\n");
+  const approveBtn = el("button", "Approve described audio");
+  approveBtn.type = "button";
+  const approveState = el("p", "Not approved yet. It stays a draft until you approve it.");
+  editor.addEventListener("input", () => {
+    if (session && session.describedApproved) {
+      session.describedApproved = false;
+      approveState.textContent = "Edited since approval — approval cleared.";
+    }
+  });
+  frag.appendChild(editor);
+  approveBtn.addEventListener("click", () => {
+    if (session) session.describedApproved = true;
+    approveState.textContent = "You approved this script exactly as it stands.";
+  });
+  frag.appendChild(approveBtn);
+  frag.appendChild(approveState);
+
+  frag.appendChild(
+    el("p", "Take the script away as a plain text file, ready to record or hand to a voice. The file holds the words exactly as the editor holds them when you press the button.")
+  );
+  const downloadBtn = el("button", "Download the script as a text file");
+  downloadBtn.type = "button";
+  downloadBtn.addEventListener("click", () => {
+    const blob = new Blob([editor.value], { type: "text/plain; charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `described-audio-${take.id}${checkData.variant ? "-repaired" : ""}.txt`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+  frag.appendChild(downloadBtn);
+  describedAreaEl.replaceChildren(frag);
 }
 
 // --- Share -----------------------------------------------------------------
@@ -455,10 +604,11 @@ function renderLibrary() {
   const catList = el("ul");
   for (const cat of sweepData.categories) {
     const remaining = cat.itemIds.filter((id) => !culledIds.has(id));
-    const line = `${cat.name}: ${remaining.length} item${remaining.length === 1 ? "" : "s"} (${cat.itemIds.reduce(
+    const remainingFiles = remaining.reduce(
       (n, id) => n + (sweepData.items.find((i) => i.id === id) || { files: 0 }).files,
       0
-    )} files)${remaining.length < cat.itemIds.length ? ` — ${cat.itemIds.length - remaining.length} culled this session` : ""}.`;
+    );
+    const line = `${cat.name}: ${remaining.length} item${remaining.length === 1 ? "" : "s"} (${remainingFiles} files)${remaining.length < cat.itemIds.length ? ` — ${cat.itemIds.length - remaining.length} culled this session` : ""}.`;
     const li = el("li", line);
     if (remaining.length) {
       const cullBtn = el("button", `Cull ${cat.name}`);
@@ -506,16 +656,18 @@ function renderLibrary() {
   frag.appendChild(el("h4", "Every item, in words"));
   const itemList = el("ul");
   for (const item of sweepData.items) {
-    const state = culledIds.has(item.id)
-      ? "Culled this session."
-      : approvedShareIds.has(item.id)
-        ? "In your Approved to share set."
-        : "Not culled, not approved.";
+    // A culled item leaves the sweep's results entirely — it is gone
+    // from this list, from its category's counts, and from the
+    // warnings; the footer line below names what was culled.
+    if (culledIds.has(item.id)) continue;
+    const state = approvedShareIds.has(item.id)
+      ? "In your Approved to share set."
+      : "Not culled, not approved.";
     const li = el(
       "li",
       `${item.id} (${item.category}${item.files > 1 ? `, ${item.files} files` : ""}): ${item.description} ${state}`
     );
-    if (!culledIds.has(item.id)) {
+    {
       const toggle = el(
         "button",
         approvedShareIds.has(item.id)
@@ -711,6 +863,7 @@ function renderUploadResults(data) {
     frag.appendChild(el("h3", `Warning — ${data.privacyWarning.name}`));
     frag.appendChild(el("p", data.privacyWarning.detail));
     frag.appendChild(el("p", `Warning source: ${warnSource}.`));
+    appendWarningActionLines(frag, data);
   }
 
   const fixes = data.checks.filter((c) => c.verdict === "fix").length;
