@@ -62,6 +62,22 @@ const COVER_REPAIR_ID = "cover-frame-hands-up";
 const CHAIN_SEP = "~";
 const chainOf = (variantId) => (variantId ? variantId.split(CHAIN_SEP) : []);
 
+// A request-supplied variant is only ever a chain of known repair
+// ids. Anything else — including traversal shapes — is rejected with
+// 400 at every route that accepts a variant, before the value can
+// reach a file path. Mirrors the discipline in server/upload.js and
+// the takes media route; the repair id itself was already allowlisted
+// through availableRepairs, and the chain around it now is too.
+const REPAIR_IDS = [
+  "reframe-margin",
+  "reframe-fit-crops",
+  "brightness-auto",
+  COVER_REPAIR_ID,
+  REDACT_REPAIR_ID,
+];
+const isValidVariantChain = (variantId) =>
+  !variantId || chainOf(variantId).every((id) => REPAIR_IDS.includes(id));
+
 // Resolves a take's media: the original seeded image, or a repaired
 // variant of it (variants live under seed-media/repaired and are produced
 // only by the repair endpoints; originals are never modified).
@@ -614,7 +630,9 @@ const server = http.createServer((req, res) => {
   if (checkMatch) {
     const take = TAKES.find((t) => t.id === checkMatch[1]);
     if (!take) return sendJson(res, 404, { error: "Unknown take id." });
-    buildChecks(take, url.searchParams.get("variant") || undefined)
+    const variantId = url.searchParams.get("variant") || undefined;
+    if (!isValidVariantChain(variantId)) return sendJson(res, 400, { error: "Unknown variant." });
+    buildChecks(take, variantId)
       .then((body) => sendJson(res, 200, body))
       .catch((err) => sendJson(res, 500, { error: `Checks failed: ${err.message}` }));
     return;
@@ -626,6 +644,7 @@ const server = http.createServer((req, res) => {
     if (!take) return sendJson(res, 404, { error: "Unknown take id." });
     (async () => {
       const variantId = url.searchParams.get("variant") || undefined;
+      if (!isValidVariantChain(variantId)) return sendJson(res, 400, { error: "Unknown variant." });
       const media =
         take.kind === "video" ? await resolveVideoMedia(take, variantId) : resolveMedia(take, variantId);
       if (!media || !media.groundTruth) return sendJson(res, 200, { repairs: [] });
@@ -670,6 +689,9 @@ const server = http.createServer((req, res) => {
         // the chain, in the order the repairs were directed.
         const baseVariant =
           typeof input.baseVariant === "string" && input.baseVariant ? input.baseVariant : undefined;
+        if (!isValidVariantChain(baseVariant)) {
+          return sendJson(res, 400, { error: "Unknown variant." });
+        }
         const media =
           take.kind === "video"
             ? await resolveVideoMedia(take, baseVariant)
@@ -837,7 +859,9 @@ const server = http.createServer((req, res) => {
   if (copyMatch && req.method === "GET") {
     const take = TAKES.find((t) => t.id === copyMatch[1]);
     if (!take) return sendJson(res, 404, { error: "Unknown take id." });
-    buildChecks(take, url.searchParams.get("variant") || undefined)
+    const variantId = url.searchParams.get("variant") || undefined;
+    if (!isValidVariantChain(variantId)) return sendJson(res, 400, { error: "Unknown variant." });
+    buildChecks(take, variantId)
       .then((result) =>
         sendJson(res, 200, {
           take: publicTake(take),
@@ -854,7 +878,9 @@ const server = http.createServer((req, res) => {
   if (publicDescMatch && req.method === "GET") {
     const take = TAKES.find((t) => t.id === publicDescMatch[1]);
     if (!take) return sendJson(res, 404, { error: "Unknown take id." });
-    buildChecks(take, url.searchParams.get("variant") || undefined)
+    const variantId = url.searchParams.get("variant") || undefined;
+    if (!isValidVariantChain(variantId)) return sendJson(res, 400, { error: "Unknown variant." });
+    buildChecks(take, variantId)
       .then((result) => sendJson(res, 200, { take: publicTake(take), variant: result.variant, publicDescription: buildPublicDescription(take, result) }))
       .catch((err) => sendJson(res, 500, { error: `Public description failed: ${err.message}` }));
     return;
@@ -876,6 +902,7 @@ const server = http.createServer((req, res) => {
     }
     (async () => {
       const variantId = url.searchParams.get("variant") || undefined;
+      if (!isValidVariantChain(variantId)) return sendJson(res, 400, { error: "Unknown variant." });
       const vm = await resolveVideoMedia(take, variantId);
       if (!vm) {
         return sendJson(res, 200, {
@@ -917,7 +944,9 @@ const server = http.createServer((req, res) => {
       } catch {
         return sendJson(res, 400, { error: "Request body must be JSON." });
       }
-      buildChecks(take, typeof input.variant === "string" ? input.variant : undefined)
+      const variantId = typeof input.variant === "string" ? input.variant : undefined;
+      if (!isValidVariantChain(variantId)) return sendJson(res, 400, { error: "Unknown variant." });
+      buildChecks(take, variantId)
         .then((result) =>
           sendJson(
             res,
@@ -946,8 +975,7 @@ const server = http.createServer((req, res) => {
     const take = TAKES.find((t) => t.id === mediaMatch[1]);
     if (!take) return sendJson(res, 404, { error: "Unknown take id." });
     const variantId = url.searchParams.get("variant") || undefined;
-    const REPAIR_IDS = ["reframe-margin", "reframe-fit-crops", "brightness-auto", COVER_REPAIR_ID, REDACT_REPAIR_ID];
-    if (variantId && !chainOf(variantId).every((id) => REPAIR_IDS.includes(id))) {
+    if (variantId && !isValidVariantChain(variantId)) {
       return sendJson(res, 400, { error: "Unknown variant." });
     }
     let filePath;
