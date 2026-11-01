@@ -37,7 +37,7 @@ const { runAudioCheck } = require("./audio");
 const { buildDescribedAudio } = require("./narrate");
 const { handleUploadRoutes } = require("./upload");
 const { buildProofCopy, draftAltText, readiness, buildPublicDescription } = require("./copy");
-const { availableRepairs, applyRepair, applyTransform, composeTransforms, REDACT_REPAIR_ID } = require("./repair");
+const { availableRepairs, applyRepair, applyTransform, composeTransforms, composeCoverFrame, REDACT_REPAIR_ID } = require("./repair");
 const { sweep } = require("./library");
 
 const MEDIA_DIR = path.join(__dirname, "seed-media");
@@ -51,9 +51,10 @@ const videoJudgeCache = new Map();
 const audioCache = new Map();
 const describedCache = new Map();
 
-// The cover-frame repair's id, shared by the resolver (which serves the
-// committed cover frames for it) and the repair endpoint (which applies
-// it as a selection, writing no files).
+// The cover-frame repair's id, shared by the resolver (which serves
+// the composed cover variant for it once the repair has produced one,
+// and the committed cover frames before that) and the repair endpoint
+// (which composes the cover poster and writes it as a real variant).
 const COVER_REPAIR_ID = "cover-frame-hands-up";
 
 // Repairs stack: a variant id is a chain of repair ids joined by "~",
@@ -104,8 +105,10 @@ function resolveMedia(take, variantId) {
 // post's 9:16 centre crop), and the take's sidecar; repairs produce new
 // recorded frames under seed-media/repaired, whose posted frames are
 // derived by the same crop the platform applies. The cover-frame
-// variant resolves to the committed hands-up frames — choosing a cover
-// frame selects media, it does not edit any.
+// repair composes its moment into a poster (composeCoverFrame) and
+// writes it as a variant like any other repair; the cover variant
+// resolves to that composed variant once it exists, and to the
+// committed hands-up frames before the repair has been directed.
 async function resolveVideoMedia(take, variantId) {
   const cacheKey = `${take.id}|${variantId || ""}`;
   if (videoMediaCache.has(cacheKey)) return videoMediaCache.get(cacheKey);
@@ -113,9 +116,16 @@ async function resolveVideoMedia(take, variantId) {
   let sidecarPath;
   let postedPath = null;
   if (variantId === COVER_REPAIR_ID) {
-    framePath = path.join(MEDIA_DIR, `${take.id}-cover-frame.png`);
-    postedPath = path.join(MEDIA_DIR, `${take.id}-cover-posted.png`);
-    sidecarPath = path.join(MEDIA_DIR, `${take.id}.json`);
+    const repairedFrame = path.join(REPAIRED_DIR, `${take.id}--${COVER_REPAIR_ID}.png`);
+    const repairedSidecar = path.join(REPAIRED_DIR, `${take.id}--${COVER_REPAIR_ID}.json`);
+    if (fs.existsSync(repairedFrame) && fs.existsSync(repairedSidecar)) {
+      framePath = repairedFrame;
+      sidecarPath = repairedSidecar;
+    } else {
+      framePath = path.join(MEDIA_DIR, `${take.id}-cover-frame.png`);
+      postedPath = path.join(MEDIA_DIR, `${take.id}-cover-posted.png`);
+      sidecarPath = path.join(MEDIA_DIR, `${take.id}.json`);
+    }
   } else if (variantId) {
     framePath = path.join(REPAIRED_DIR, `${take.id}--${variantId}.png`);
     sidecarPath = path.join(REPAIRED_DIR, `${take.id}--${variantId}.json`);
@@ -726,40 +736,47 @@ const server = http.createServer((req, res) => {
         }
         const resultVariantId = baseVariant ? `${baseVariant}${CHAIN_SEP}${input.repairId}` : input.repairId;
         let changes;
-        if (take.kind === "video" && input.repairId === COVER_REPAIR_ID && !baseVariant) {
-          // A cover-frame choice on the original selects which
-          // committed frame represents the post; no file is written
-          // and no pixel is edited. The variant resolves to the
-          // hands-up frames.
-          changes = [
-            `Cover frame: the post will now open on the moment at ${Math.round(context.coverFrameAtSeconds)} seconds, inside the ${media.sidecar.handsUpSeconds[0]} to ${media.sidecar.handsUpSeconds[1]} second window where your hands are up signing.`,
-            "The video itself is unchanged — nothing was redrawn, moved, or cut; only the frame chosen to represent the post has moved.",
-          ];
-        } else if (take.kind === "video" && input.repairId === COVER_REPAIR_ID) {
-          // A cover-frame choice stacked on a reframed variant: the
-          // reframe is one transform applied to the whole take, so the
-          // hands-up moment is brought into the chain's exact geometry
-          // by replaying the chain's composed transform on the cover
-          // frame. The result is a real variant with its own files.
-          const transform = media.sidecar && media.sidecar.reframeTransform;
-          if (!transform) {
+        if (take.kind === "video" && input.repairId === COVER_REPAIR_ID) {
+          // The cover-frame choice composes its moment into a poster
+          // (composeCoverFrame in repair.js): the picture fitted to
+          // the post with the subject centred in the frame. On the
+          // original the composition is made from the take's own
+          // geometry; stacked on a chain, it is computed in the chain's
+          // geometry (its composed reframe transform) and applied to
+          // the chosen frame in one pass, landing on the same poster.
+          // Either way the result is a real variant with its own
+          // files, and its sidecar carries every recorded box through
+          // the composition's own transform, so the re-check measures
+          // the composed cover.
+          const baseTransform = baseVariant ? media.sidecar && media.sidecar.reframeTransform : null;
+          if (baseVariant && !baseTransform) {
             return sendJson(res, 400, { error: "This chain has no reframe to carry the cover frame into; the cover choice cannot stack here." });
           }
           const origSidecar = JSON.parse(fs.readFileSync(path.join(MEDIA_DIR, `${take.id}.json`), "utf8"));
           const coverFrame = fs.readFileSync(path.join(MEDIA_DIR, `${take.id}-cover-frame.png`));
-          const out = await applyTransform(
+          const extras = {};
+          for (const key of ["bannerTextBox", "noiseWordBox", "tourWordBox"]) {
+            if (origSidecar[key]) extras[key] = origSidecar[key];
+          }
+          const out = await composeCoverFrame(
             coverFrame,
-            { subject: origSidecar.subject, sign: origSidecar.banner, privateItem: origSidecar.privateItem },
-            transform
+            {
+              subject: origSidecar.subject,
+              sign: origSidecar.banner,
+              privateItem: origSidecar.privateItem,
+              extras,
+            },
+            baseTransform || null
           );
           fs.mkdirSync(REPAIRED_DIR, { recursive: true });
           fs.writeFileSync(path.join(REPAIRED_DIR, `${take.id}--${resultVariantId}.png`), out.buffer);
           const variantSidecar = {
-            ...media.sidecar,
+            ...(baseVariant ? media.sidecar : origSidecar),
             subject: out.groundTruth.subject,
             banner: out.groundTruth.sign,
+            ...out.extras,
             contentBox: out.contentBox,
-            reframeTransform: transform,
+            reframeTransform: out.transform,
           };
           fs.writeFileSync(
             path.join(REPAIRED_DIR, `${take.id}--${resultVariantId}.json`),
@@ -767,8 +784,8 @@ const server = http.createServer((req, res) => {
           );
           changes = [
             `Cover frame: the post will now open on the moment at ${Math.round(context.coverFrameAtSeconds)} seconds, inside the ${media.sidecar.handsUpSeconds[0]} to ${media.sidecar.handsUpSeconds[1]} second window where your hands are up signing.`,
-            "The moment was brought into the reframed picture you already approved — the same pull-back, applied to that frame — so the whole banner and both hands are inside the post.",
-            "The video itself is unchanged — nothing was redrawn, moved, or cut; only the frame chosen to represent the post has moved.",
+            "That moment is composed as the post's cover: the picture is fitted to the post with you centred in the frame, so the cover reads as a composed poster rather than a wide shot with you small and low in it. The checks run again on the composed cover.",
+            "The video itself is unchanged — nothing was redrawn, moved, or cut; the cover is a composed still of the moment you chose.",
           ];
         } else {
           const out = await applyRepair(
@@ -988,7 +1005,8 @@ const server = http.createServer((req, res) => {
     if (take.kind === "video") {
       filePath = !variantId
         ? path.join(MEDIA_DIR, `${take.id}-posted.png`)
-        : variantId === COVER_REPAIR_ID
+        : variantId === COVER_REPAIR_ID &&
+            !fs.existsSync(path.join(REPAIRED_DIR, `${take.id}--${COVER_REPAIR_ID}.png`))
           ? path.join(MEDIA_DIR, `${take.id}-cover-posted.png`)
           : path.join(REPAIRED_DIR, `${take.id}--${variantId}.png`);
     } else {

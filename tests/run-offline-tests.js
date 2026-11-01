@@ -283,9 +283,10 @@ const { sweep } = require("../server/library");
 
   // 10. Repair stacking: a chain applies each repair to the result of
   // the last. For ST-V2 the demo directs reframe, then the cover-frame
-  // choice — and the cover only pays off inside the reframed frame, so
-  // the choice replays the reframe's own transform on the hands-up
-  // moment (Nexus ruling, Oct 29, 2026: "that's the point of the app").
+  // choice. The cover composes its moment into a poster (Option B,
+  // Nexus ruling, Nov 1, 2026): computed in the chain's geometry and
+  // applied to the hands-up frame in one pass, so a stacked cover
+  // lands on the same poster the bare choice produces.
   const { applyTransform, composeTransforms } = require("../server/repair");
   const sampleBox = { x0: 100, y0: 50, x1: 300, y1: 200 };
   const t1 = { factor: 0.5, offX: 10, offY: 20 };
@@ -303,29 +304,103 @@ const { sweep } = require("../server/library");
   );
   ok("stacking: transforms compose, and a chain never re-offers its own repairs");
 
+  const { composeCoverFrame } = require("../server/repair");
   const v2cover = fs.readFileSync(path.join(mediaDir, "ST-V2-cover-frame.png"));
-  const v2stacked = await applyTransform(
+  const v2coverBoxes = {
+    subject: v2sidecar.subject,
+    sign: v2sidecar.banner,
+    privateItem: v2sidecar.privateItem,
+    extras: {
+      bannerTextBox: v2sidecar.bannerTextBox,
+      noiseWordBox: v2sidecar.noiseWordBox,
+      tourWordBox: v2sidecar.tourWordBox,
+    },
+  };
+  const postedOf = async (buffer) => {
+    const img = await Jimp.fromBuffer(buffer);
+    img.crop({
+      x: Math.round(v2win.x0),
+      y: Math.round(v2win.y0),
+      w: Math.round(v2win.x1 - v2win.x0),
+      h: Math.round(v2win.y1 - v2win.y0),
+    });
+    return img.getBuffer("image/png");
+  };
+  const v2stacked = await composeCoverFrame(v2cover, v2coverBoxes, v2fixed.transform);
+  const v2stackedSidecar = {
+    ...v2sidecar,
+    subject: v2stacked.groundTruth.subject,
+    banner: v2stacked.groundTruth.sign,
+    ...v2stacked.extras,
+    contentBox: v2stacked.contentBox,
+  };
+  const v2stackedM = await measureVideoFrames(v2stacked.buffer, await postedOf(v2stacked.buffer), v2stackedSidecar);
+  assert.strictEqual(v2stackedM.framing.verdict, "pass", "stacked variant: framing passes in the posted frame");
+  assert.strictEqual(v2stackedM.cropSafety.verdict, "pass", "stacked variant: the banner survives the crops");
+  assert.strictEqual(v2stackedM.quality.verdict, "pass", "stacked variant: quality passes on the scoped measurement");
+  ok("ST-V2 stacked chain: reframe, then the cover composed as a poster — framing, crop, quality all pass");
+
+  // The composed cover's geometry, against the uncomposed cover it
+  // replaces (the reframe transform replayed on the hands-up frame,
+  // which left the subject low — centre 402 of 720 — in the posted
+  // frame): the composed poster centres the subject vertically, keeps
+  // the whole banner and its words inside the picture it declares,
+  // and is a different file from both the raw cover frame and the
+  // uncomposed replay.
+  const v2postedSubject = {
+    x0: v2stacked.groundTruth.subject.x0 - v2win.x0,
+    y0: v2stacked.groundTruth.subject.y0 - v2win.y0,
+    x1: v2stacked.groundTruth.subject.x1 - v2win.x0,
+    y1: v2stacked.groundTruth.subject.y1 - v2win.y0,
+  };
+  assert(
+    Math.abs((v2postedSubject.y0 + v2postedSubject.y1) / 2 - 360) <= 30,
+    "the composed poster's subject is centred vertically in the posted frame"
+  );
+  const v2cb = v2stacked.contentBox;
+  const v2banner = v2stacked.groundTruth.sign;
+  assert(
+    v2banner.x0 >= v2cb.x0 && v2banner.x1 <= v2cb.x1 && v2banner.y0 >= v2cb.y0 && v2banner.y1 <= v2cb.y1,
+    "the whole banner sits inside the composed picture"
+  );
+  const v2tb = v2stacked.extras.bannerTextBox;
+  assert(
+    v2tb.x0 >= v2cb.x0 && v2tb.x1 <= v2cb.x1 && v2tb.y0 >= v2cb.y0 && v2tb.y1 <= v2cb.y1,
+    "the banner's words sit whole inside the composed picture"
+  );
+  const v2uncomposed = await applyTransform(
     v2cover,
     { subject: v2sidecar.subject, sign: v2sidecar.banner, privateItem: v2sidecar.privateItem },
     v2fixed.transform
   );
-  const v2simg = await Jimp.fromBuffer(v2stacked.buffer);
-  v2simg.crop({
-    x: Math.round(v2win.x0),
-    y: Math.round(v2win.y0),
-    w: Math.round(v2win.x1 - v2win.x0),
-    h: Math.round(v2win.y1 - v2win.y0),
-  });
-  const v2stackedM = await measureVideoFrames(v2stacked.buffer, await v2simg.getBuffer("image/png"), {
+  assert(!v2stacked.buffer.equals(v2cover), "the composed cover differs from the raw cover frame");
+  assert(!v2stacked.buffer.equals(v2uncomposed.buffer), "the composed cover differs from the uncomposed replay");
+  ok("cover composition: subject centred, the whole banner and its words inside the picture");
+
+  // Stacking order: the bare cover choice composes the same poster
+  // from the original's own geometry — its measured framing, crop,
+  // and quality pass too, and its subject lands within a few pixels
+  // of the stacked poster's.
+  const v2bare = await composeCoverFrame(v2cover, v2coverBoxes, null);
+  const v2bareM = await measureVideoFrames(v2bare.buffer, await postedOf(v2bare.buffer), {
     ...v2sidecar,
-    subject: v2stacked.groundTruth.subject,
-    banner: v2stacked.groundTruth.sign,
-    contentBox: v2stacked.contentBox,
+    subject: v2bare.groundTruth.subject,
+    banner: v2bare.groundTruth.sign,
+    ...v2bare.extras,
+    contentBox: v2bare.contentBox,
   });
-  assert.strictEqual(v2stackedM.framing.verdict, "pass", "stacked variant: framing passes in the posted frame");
-  assert.strictEqual(v2stackedM.cropSafety.verdict, "pass", "stacked variant: the banner survives the crops");
-  assert.strictEqual(v2stackedM.quality.verdict, "pass", "stacked variant: quality passes on the scoped measurement");
-  ok("ST-V2 stacked chain: reframe, then the hands-up cover inside it — framing, crop, quality all pass");
+  assert.strictEqual(v2bareM.framing.verdict, "pass", "bare cover: framing passes in the posted frame");
+  assert.strictEqual(v2bareM.cropSafety.verdict, "pass", "bare cover: the banner survives the crops");
+  assert.strictEqual(v2bareM.quality.verdict, "pass", "bare cover: quality passes on the scoped measurement");
+  const centreOf = (b) => ({ x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2 });
+  const bareC = centreOf(v2bare.groundTruth.subject);
+  const stackedC = centreOf(v2stacked.groundTruth.subject);
+  assert(
+    Math.abs(bareC.x - stackedC.x) <= 6 && Math.abs(bareC.y - stackedC.y) <= 6,
+    "bare and stacked cover compositions land on the same poster"
+  );
+  assert(!v2bare.buffer.equals(v2cover), "the bare composed cover differs from the raw cover frame");
+  ok("cover composition: cover on the original and cover on the reframe both produce the composed poster");
 
   // 11. SAM wiring (Oct 30, 2026): the designed model supplies the
   // boxes when it answers; the take's recorded facts stand when it

@@ -125,6 +125,118 @@ function composeTransforms(t1, t2) {
   };
 }
 
+// Composes a video's chosen cover frame into a poster (Option B,
+// Nexus ruling, Nov 1, 2026). Selecting a cover moment used to serve
+// the wide recorded frame as-is, and the first-impression check read
+// it honestly: a small, low, off-centre figure under a dominating
+// dark background. A cover is a poster, so the repair now composes
+// one — deterministically, from the chosen frame alone:
+//
+//   - The poster picture is the region holding the subject and the
+//     WHOLE sign. (The crop check protects the sign whole — a tighter
+//     crop that let the sign's ends fall out of frame would fail the
+//     take's own re-check — so the region is the subject and the sign
+//     together, no more and no less.)
+//   - That region is scaled to fill the platform safe area and placed
+//     ON THE SUBJECT: the subject sits centred in the frame —
+//     vertically exactly, horizontally as far as the sign's fit
+//     allows — instead of wherever the wide shot happened to leave
+//     it. The canvas around the picture is filled from the frame's
+//     own edge colour.
+//   - Every recorded box is carried through the same mathematics, so
+//     the variant's sidecar describes the composed frame exactly and
+//     the standard re-check measures the poster that was produced.
+//
+// `boxes` are the take's ORIGINAL boxes: { subject, sign, privateItem,
+// extras } (extras: any further named boxes to carry — the sign's text
+// and word boxes — keyed as the sidecar keys them). `baseTransform`
+// is the chain's composed transform so far (original → base variant),
+// or null when the cover is chosen on the original. The composition
+// is computed in the base variant's geometry and applied to the
+// chosen frame in a single crop-and-scale, so a stacked cover lands
+// on the same poster the bare choice produces.
+async function composeCoverFrame(buffer, boxes, baseTransform) {
+  const img = await Jimp.fromBuffer(buffer);
+  const { width, height } = img.bitmap;
+  const bf = baseTransform ? baseTransform.factor : 1;
+  const boX = baseTransform ? baseTransform.offX : 0;
+  const boY = baseTransform ? baseTransform.offY : 0;
+  const inBase = (box) => (box ? transformBox(box, bf, boX, boY) : null);
+  const subjectB = inBase(boxes.subject);
+  if (!subjectB) throw new Error("A cover composition needs the take's subject.");
+  const signB = inBase(boxes.sign);
+
+  // The poster region, in base-variant coordinates: the subject and
+  // the whole sign together, clamped to the frame.
+  const essential = unionBox([subjectB, signB]);
+  const region = {
+    x0: Math.max(0, essential.x0),
+    y0: Math.max(0, essential.y0),
+    x1: Math.min(width, essential.x1),
+    y1: Math.min(height, essential.y1),
+  };
+  const regionW = region.x1 - region.x0;
+  const regionH = region.y1 - region.y0;
+
+  // Scale the region to the safe area and place it: horizontally the
+  // region centres in the safe area; vertically the SUBJECT centres
+  // in the frame (clamped so the picture never leaves the frame).
+  const safe = safeArea(width, height);
+  const scale = Math.min((safe.x1 - safe.x0) / regionW, (safe.y1 - safe.y0) / regionH);
+  const picW = Math.round(regionW * scale);
+  const picH = Math.round(regionH * scale);
+  const offX = Math.round((safe.x0 + safe.x1) / 2 - picW / 2);
+  const subjectCyB = (subjectB.y0 + subjectB.y1) / 2;
+  const offY = Math.max(
+    0,
+    Math.min(height - picH, Math.round(height / 2 - (subjectCyB - region.y0) * scale))
+  );
+
+  // The pixels: the chosen frame cropped to the same region, expressed
+  // back in the frame's own coordinates, scaled once, composited onto
+  // a canvas filled from the frame's own edge colour.
+  const rawX0 = Math.max(0, Math.round((region.x0 - boX) / bf));
+  const rawY0 = Math.max(0, Math.round((region.y0 - boY) / bf));
+  const rawX1 = Math.min(width, Math.round((region.x1 - boX) / bf));
+  const rawY1 = Math.min(height, Math.round((region.y1 - boY) / bf));
+  const fill = img.getPixelColor(0, 0); // the take's own edge colour
+  const picture = img
+    .clone()
+    .crop({ x: rawX0, y: rawY0, w: Math.max(1, rawX1 - rawX0), h: Math.max(1, rawY1 - rawY0) })
+    .scale(scale * bf);
+  const canvas = new Jimp({ width, height, color: fill });
+  canvas.composite(picture, offX, offY);
+
+  // The single transform equivalent to the whole composition, from
+  // the take's original coordinates: a point p lands at
+  // (base(p) − region origin) × scale + offset. Every recorded box —
+  // the subject, the sign, its text and word boxes, the private item —
+  // is carried through it, so the sidecar stays honest.
+  const transform = {
+    factor: scale * bf,
+    offX: Math.round((boX - region.x0) * scale + offX),
+    offY: Math.round((boY - region.y0) * scale + offY),
+  };
+  const carry = (box) => (box ? transformBox(box, transform.factor, transform.offX, transform.offY) : null);
+  const extras = {};
+  for (const [key, box] of Object.entries(boxes.extras || {})) {
+    if (box) extras[key] = carry(box);
+  }
+  return {
+    buffer: await canvas.getBuffer("image/png"),
+    groundTruth: {
+      subject: carry(boxes.subject),
+      sign: carry(boxes.sign),
+      privateItem: carry(boxes.privateItem),
+    },
+    extras,
+    contentBox: { x0: offX, y0: offY, x1: offX + picW, y1: offY + picH },
+    transform,
+    region,
+    scale,
+  };
+}
+
 // The privacy redaction repair's id. It is offered from the check
 // result, not from a verdict: when a take's private-information
 // warning is active and the private item's region is located (a
@@ -178,12 +290,15 @@ function availableRepairs(measurement, groundTruth, context) {
     });
   }
   if (context && typeof context.coverFrameAtSeconds === "number") {
-    // A cover-frame choice is a selection, not a pixel edit: it is
-    // offered whenever the take has a hands-up window to choose from,
-    // and applying it produces the variant that opens on that moment.
+    // A cover-frame choice is offered whenever the take has a hands-up
+    // window to choose from. Applying it composes that moment into a
+    // poster (see composeCoverFrame): the picture is fitted to the
+    // post with the subject centred in the frame, so the cover reads
+    // as a composed poster rather than a wide shot with the subject
+    // small and low in it.
     repairs.push({
       id: "cover-frame-hands-up",
-      name: `Cover frame: use the moment at ${Math.round(context.coverFrameAtSeconds)} seconds, where your hands are up signing`,
+      name: `Cover frame: use the moment at ${Math.round(context.coverFrameAtSeconds)} seconds, where your hands are up signing, composed as a poster — the picture fitted to the post with you centred in the frame, so the cover reads as a composed poster`,
       fixesCheck: "firstImpression",
     });
   }
@@ -328,4 +443,4 @@ async function applyGain(buffer, gain) {
   return img.getBuffer("image/png");
 }
 
-module.exports = { availableRepairs, applyRepair, applyTransform, composeTransforms, safeArea, unionBox, applyGain, REDACT_REPAIR_ID };
+module.exports = { availableRepairs, applyRepair, applyTransform, composeTransforms, composeCoverFrame, safeArea, unionBox, applyGain, REDACT_REPAIR_ID };
