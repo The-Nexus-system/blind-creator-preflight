@@ -35,7 +35,7 @@ function buildBoxPrompt(intent, width, height) {
     "You are the measurement fallback inside Blind Creator Pre-Flight, an app a blind creator uses before posting.",
     `The creator's stated intent for this take: ${intent}`,
     `The image is ${width} pixels wide and ${height} pixels tall. Coordinates are source pixels, with (0, 0) at the top left.`,
-    "Estimate the bounding box of the main subject (the person the post is about). If the image also has a sign, banner, or other text region that matters to the post, estimate its bounding box too; if there is none, report null for it.",
+    "Estimate the bounding box of the main subject (the person the post is about). If the image also has a sign, banner, or other text region the creator means viewers to read, estimate its bounding box too; if there is none, report null for it. Never report a document, letter, envelope, ID or bank card, or a screen showing personal information as the text region — those are private items, not signage.",
     "Answer with ONLY a JSON object, no prose, of exactly this shape:",
     "{",
     '  "subject": {"x0": 0, "y0": 0, "x1": 0, "y1": 0},',

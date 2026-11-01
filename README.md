@@ -9,7 +9,7 @@ The idea and the design were discussed beforehand. Every line of code in this re
 Before a blind creator posts a photo or a short video, Pre-Flight runs six checks inside a simulated Instagram composer and reports each one — in plain text a screen reader and a braille display read directly — as pass, fix, or uncertain:
 
 1. Framing — is the subject in the shot, and where?
-2. Crop safety — would the platform's crop cut anything that matters?
+2. Crop safety — would the platform's crop cut the subject, or text the creator means to show? Private items are not counted here; the privacy warning and its removal repair handle those.
 3. Sharpness and quality — is the take usable?
 4. Text in the image — what does any visible text say, and is it legible?
 5. First impression — what does a sighted viewer see first?

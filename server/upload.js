@@ -141,12 +141,54 @@ async function runUploadChecks(buffer, deps = {}) {
     byId[c.id] = { id: c.id, name: c.name, verdict: "uncertain", detail: "", source: "pending" };
   }
 
-  // No recorded facts: resolvePhotoBoxes is given recorded: null, so
-  // its chain can end at "sam", "judgement", or an honest unavailable —
-  // never "recorded".
+  // The semantic checks and the privacy-region estimate run FIRST,
+  // before any boxes are resolved: the crop check needs to know where
+  // the private item is before it can keep that item out of its
+  // protected set (the Nexus's Option A ruling, Nov 1, 2026 — a
+  // private item is not protected content for crop safety; its
+  // protection is the warning and the removal repair).
+  const sem = await runSemanticChecks(buffer, UPLOAD_INTENT, deps.chat);
+  Object.assign(byId.text, { verdict: sem.text.verdict, detail: sem.text.detail, source: sem.source });
+  Object.assign(byId.firstImpression, {
+    verdict: sem.firstImpression.verdict,
+    detail: sem.firstImpression.detail,
+    source: sem.source,
+  });
+
+  // When the privacy warning fires on a supplied photo, the judgement
+  // tier is also asked to locate the private item, so the warning has
+  // an action: the redaction repair. The estimate is held to the same
+  // strict parsing as every judgement reply; a region that cannot be
+  // located — the model says so, its reply cannot be trusted, or the
+  // call fails — leaves privacyRegion null, no redaction is offered,
+  // and the client says plainly that the app can tell private
+  // information is present but cannot locate it precisely enough to
+  // take it off automatically. deps.regionEstimator is injectable for
+  // the offline tests; production asks server/judge.js's estimator on
+  // the same chat route the semantic checks used.
+  let privacyRegion = null;
+  if (sem.privacyWarning) {
+    try {
+      const estimate = deps.regionEstimator
+        ? await deps.regionEstimator(buffer, sem.privacyWarning.name)
+        : await estimatePrivateRegion(buffer, sem.privacyWarning.name, deps.chat);
+      if (estimate && estimate.status === "ok" && estimate.region) {
+        privacyRegion = estimate.region;
+      }
+    } catch {
+      privacyRegion = null;
+    }
+  }
+
+  // Almost no recorded facts: resolvePhotoBoxes is given a record
+  // carrying ONLY the located private region — never a subject, so
+  // its chain can still end at "sam", "judgement", or an honest
+  // unavailable, never "recorded". The region is there for one
+  // purpose: the crop check's guard drops a located "sign" that is
+  // in fact the private item (see dropPrivateSign in server/sam.js).
   const resolved = await resolvePhotoBoxes({
     buffer,
-    recorded: null,
+    recorded: privacyRegion ? { privateItem: privacyRegion } : null,
     segmenter: deps.segmenter,
     judge: deps.judge,
     intent: UPLOAD_INTENT,
@@ -206,39 +248,6 @@ async function runUploadChecks(buffer, deps = {}) {
     detail: "Still photo: there is no audio track to check.",
     source: "determined",
   });
-
-  const sem = await runSemanticChecks(buffer, UPLOAD_INTENT, deps.chat);
-  Object.assign(byId.text, { verdict: sem.text.verdict, detail: sem.text.detail, source: sem.source });
-  Object.assign(byId.firstImpression, {
-    verdict: sem.firstImpression.verdict,
-    detail: sem.firstImpression.detail,
-    source: sem.source,
-  });
-
-  // When the privacy warning fires on a supplied photo, the judgement
-  // tier is also asked to locate the private item, so the warning has
-  // an action: the redaction repair. The estimate is held to the same
-  // strict parsing as every judgement reply; a region that cannot be
-  // located — the model says so, its reply cannot be trusted, or the
-  // call fails — leaves privacyRegion null, no redaction is offered,
-  // and the client says plainly that the app can tell private
-  // information is present but cannot locate it precisely enough to
-  // take it off automatically. deps.regionEstimator is injectable for
-  // the offline tests; production asks server/judge.js's estimator on
-  // the same chat route the semantic checks used.
-  let privacyRegion = null;
-  if (sem.privacyWarning) {
-    try {
-      const estimate = deps.regionEstimator
-        ? await deps.regionEstimator(buffer, sem.privacyWarning.name)
-        : await estimatePrivateRegion(buffer, sem.privacyWarning.name, deps.chat);
-      if (estimate && estimate.status === "ok" && estimate.region) {
-        privacyRegion = estimate.region;
-      }
-    } catch {
-      privacyRegion = null;
-    }
-  }
 
   const checks = CHECKS.map((c) => byId[c.id]);
   const allSettled = checks.every((c) =>

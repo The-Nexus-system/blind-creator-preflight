@@ -31,7 +31,7 @@ const { TAKES, CHECKS } = require("./seed-takes");
 const { measureImage, measureVideoFrames } = require("./measure");
 const { Jimp } = require("jimp");
 const { runSemanticChecks } = require("./semantic");
-const { locateBoxes, resolvePhotoBoxes } = require("./sam");
+const { locateBoxes, resolvePhotoBoxes, dropPrivateSign } = require("./sam");
 const { estimateBoxes } = require("./judge");
 const { runAudioCheck } = require("./audio");
 const { buildDescribedAudio } = require("./narrate");
@@ -346,10 +346,13 @@ async function videoJudgementBoxes(take, variantId, videoMedia) {
     try {
       const post = await estimateBoxes(videoMedia.postedBuffer, take.intent);
       if (post && post.status === "ok") {
-        const pm = await measureImage(videoMedia.postedBuffer, {
-          subject: post.subject,
-          sign: post.sign,
-        });
+        const pm = await measureImage(
+          videoMedia.postedBuffer,
+          dropPrivateSign(
+            { subject: post.subject, sign: post.sign },
+            { privateItem: videoMedia.sidecar.privateItem || null }
+          )
+        );
         if (pm.framing) {
           framing = {
             subjectTouchesEdges: pm.framing.subjectTouchesEdges,
@@ -368,7 +371,10 @@ async function videoJudgementBoxes(take, variantId, videoMedia) {
       if (rec && rec.status === "ok") {
         const rm = await measureImage(
           videoMedia.frameBuffer,
-          { subject: rec.subject, sign: rec.sign, labels: { sign: "banner" } },
+          dropPrivateSign(
+            { subject: rec.subject, sign: rec.sign, labels: { sign: "banner" } },
+            { privateItem: videoMedia.sidecar.privateItem || null }
+          ),
           videoMedia.sidecar.contentBox || null
         );
         if (rm.cropSafety) cropSafety = rm.cropSafety;

@@ -90,6 +90,26 @@ async function locateBoxes(buffer, segmenter) {
 //     with the reason.
 //   { kind: "failed", reason }                      — the SAM call
 //     failed; the caller reports framing/crop uncertain with the reason.
+// Nexus ruling (Nov 1, 2026, Option A): a private item is NOT
+// protected content for the crop check. Crop safety protects what
+// the creator intends to show — the subject and intended text. When
+// a locating tier reports a "sign" that is in fact the recorded
+// private item (a letter, a document, a card), the sign is dropped
+// before measuring: the item's protection is the privacy warning
+// and the removal repair, not the crop check. The reported sign
+// counts as the private item when at least half of the sign's own
+// area falls inside the private item's box.
+function dropPrivateSign(boxes, recorded) {
+  if (!boxes || !boxes.sign || !recorded || !recorded.privateItem) return boxes;
+  const s = boxes.sign;
+  const p = recorded.privateItem;
+  const ix = Math.max(0, Math.min(s.x1, p.x1) - Math.max(s.x0, p.x0));
+  const iy = Math.max(0, Math.min(s.y1, p.y1) - Math.max(s.y0, p.y0));
+  const signArea = (s.x1 - s.x0) * (s.y1 - s.y0);
+  if (signArea > 0 && (ix * iy) / signArea >= 0.5) return { ...boxes, sign: null };
+  return boxes;
+}
+
 async function resolvePhotoBoxes({ buffer, recorded, segmenter, judge, intent }) {
   let located;
   try {
@@ -112,7 +132,7 @@ async function resolvePhotoBoxes({ buffer, recorded, segmenter, judge, intent })
     };
   }
   if (located.subject) {
-    return { kind: "sam", groundTruth: { subject: located.subject, sign: located.sign } };
+    return { kind: "sam", groundTruth: dropPrivateSign({ subject: located.subject, sign: located.sign }, recorded) };
   }
   // SAM answered with no match for the subject. The next tier is model
   // judgement, reported as measured-by-judgement — never as a
@@ -132,7 +152,7 @@ async function resolvePhotoBoxes({ buffer, recorded, segmenter, judge, intent })
   if (judged && judged.status === "ok") {
     return {
       kind: "judgement",
-      groundTruth: { subject: judged.subject, sign: judged.sign },
+      groundTruth: dropPrivateSign({ subject: judged.subject, sign: judged.sign }, recorded),
       judgementModel: judged.model || null,
     };
   }
@@ -146,4 +166,4 @@ async function resolvePhotoBoxes({ buffer, recorded, segmenter, judge, intent })
   };
 }
 
-module.exports = { locateBoxes, resolvePhotoBoxes, largestBox };
+module.exports = { locateBoxes, resolvePhotoBoxes, largestBox, dropPrivateSign };

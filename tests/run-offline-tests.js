@@ -384,6 +384,48 @@ const { sweep } = require("../server/library");
   assert(failed.reason.includes("HTTP 500"), "the failure reason is carried for the uncertain verdicts");
   ok("SAM resolution: calls-off falls back quietly; a real failure is reported, never hidden");
 
+  // Option A (Nexus ruling, Nov 1, 2026): a private item is not
+  // protected content for the crop check. When a locating tier
+  // reports the private item itself as the "sign", the sign is
+  // dropped before measuring; a genuine sign elsewhere is kept.
+  const p8bufA = fs.readFileSync(path.join(mediaDir, "ST-P8.png"));
+  const p8gtA = JSON.parse(fs.readFileSync(path.join(mediaDir, "ST-P8.json"), "utf8"));
+  const judgedPrivate = await resolvePhotoBoxes({
+    buffer: p8bufA,
+    recorded: p8gtA,
+    segmenter: async () => [],
+    judge: async () => ({
+      status: "ok",
+      subject: p8gtA.subject,
+      sign: p8gtA.privateItem,
+      model: "stub",
+    }),
+  });
+  assert.strictEqual(judgedPrivate.kind, "judgement");
+  assert.strictEqual(judgedPrivate.groundTruth.sign, null, "the letter read as a sign is dropped — it is the private item");
+  const p8CropOnly = await measureImage(p8bufA, judgedPrivate.groundTruth);
+  assert.strictEqual(p8CropOnly.cropSafety.verdict, "pass", "ST-P8's crop settles from its subject once the letter leaves the protected set");
+  const judgedSign = await resolvePhotoBoxes({
+    buffer: p8bufA,
+    recorded: p8gtA,
+    segmenter: async () => [],
+    judge: async () => ({
+      status: "ok",
+      subject: p8gtA.subject,
+      sign: { x0: 60, y0: 40, x1: 420, y1: 130 },
+      model: "stub",
+    }),
+  });
+  assert.deepStrictEqual(judgedSign.groundTruth.sign, { x0: 60, y0: 40, x1: 420, y1: 130 }, "an intended sign elsewhere in the frame is kept");
+  const samPrivate = await resolvePhotoBoxes({
+    buffer: p8bufA,
+    recorded: p8gtA,
+    segmenter: async (buf, concept) => (concept === "person" ? [p8gtA.subject] : [p8gtA.privateItem]),
+  });
+  assert.strictEqual(samPrivate.kind, "sam");
+  assert.strictEqual(samPrivate.groundTruth.sign, null, "the guard applies to SAM's boxes too");
+  ok("crop protection (Option A): a private item reported as the sign is dropped on every locating tier; intended text is kept");
+
   // 12. Audio check, wired to transcription (stubs; no network). The
   // silent branch must not touch the transcriber at all — there is no
   // track to transcribe.
@@ -783,6 +825,51 @@ const { sweep } = require("../server/library");
   assert.strictEqual(upFailed.measurementSource, "sam-failed");
   assert.strictEqual(upFailed.checks.find((c) => c.id === "framing").verdict, "uncertain");
   ok("upload (d): no tier can locate the subject → framing/crop uncertain, never a pass");
+
+  // Option A for uploads (Nexus ruling, Nov 1, 2026): the semantic
+  // step and the region estimate run before the boxes are resolved,
+  // so when the boxes judge reports the private item itself as the
+  // sign, the crop check drops it — and keeps it when no region
+  // could be located, because then nothing proves it is private.
+  const { runUploadChecks } = require("../server/upload");
+  const p8upBuf = fs.readFileSync(path.join(mediaDir, "ST-P8.png"));
+  const firingReplyA = JSON.stringify({
+    text: { verdict: "pass", detail: "A letter is visible." },
+    firstImpression: { verdict: "pass", detail: "A person at a desk." },
+    privacy: { fires: true, name: "A readable home address on a letter.", detail: "Posting would make the address public." },
+  });
+  const letterJudge = async () => ({
+    status: "ok",
+    subject: { x0: 300, y0: 180, x1: 620, y1: 820 },
+    sign: { x0: 700, y0: 800, x1: 950, y1: 950 },
+    model: "stub",
+  });
+  const guardedUp = await runUploadChecks(p8upBuf, {
+    segmenter: async () => [],
+    judge: letterJudge,
+    chat: async () => firingReplyA,
+    regionEstimator: async () => ({ status: "ok", region: { x0: 700, y0: 800, x1: 950, y1: 950 } }),
+  });
+  assert.strictEqual(guardedUp.result.privacyRedactionOffered, true, "the located letter still offers its removal");
+  assert.strictEqual(guardedUp.boxes.sign, null, "the letter is dropped from the crop check's protected set");
+  assert.strictEqual(
+    guardedUp.result.checks.find((c) => c.id === "crop").verdict,
+    "pass",
+    "the upload's crop settles from its subject once the letter leaves the protected set"
+  );
+  const unguardedUp = await runUploadChecks(p8upBuf, {
+    segmenter: async () => [],
+    judge: letterJudge,
+    chat: async () => firingReplyA,
+    regionEstimator: async () => ({ status: "ok", region: null }),
+  });
+  assert.deepStrictEqual(unguardedUp.boxes.sign, { x0: 700, y0: 800, x1: 950, y1: 950 }, "no located region — the reported sign stands");
+  assert.strictEqual(
+    unguardedUp.result.checks.find((c) => c.id === "crop").verdict,
+    "fix",
+    "without a located region the same box still flags the crop"
+  );
+  ok("upload (Option A): a located private item leaves the crop protected set; an unlocated one changes nothing");
 
   const uploadHttp = http.createServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
