@@ -16,14 +16,14 @@
   <section aria-labelledby="own-photo-heading">
     <h2 id="own-photo-heading">Check your own photo</h2>
     <p>Pick a photo of your own and the same six checks run on it, live. Your browser converts the photo you choose to PNG and sends it to be checked; Pre-Flight keeps a working copy of it on the server while you check, repair, and share it, and that copy is deleted within two hours. A photo of your own has no recorded facts and no stated intent, so where its subject cannot be located, framing and crop safety will say uncertain and say why.</p>
+    <p id="own-photo-hint">Any photo your browser can open works — HEIC, JPEG, or PNG; it is converted to PNG in the browser before it is sent. Photos over the 15 MB limit are scaled down first.</p>
     <p>
       <label for="own-photo-input">Choose a photo to check:</label>
       <!-- Image-only on purpose: do not widen this accept to video/* —
            Android Chrome drops the Camera tile for a combined accept;
            a video picker would be its own separate control. -->
-      <input type="file" id="own-photo-input" accept="image/*" aria-describedby="own-photo-hint own-photo-status">
+      <input type="file" id="own-photo-input" accept="image/*">
     </p>
-    <p id="own-photo-hint">Any photo your browser can open works — HEIC, JPEG, or PNG; it is converted to PNG in the browser before it is sent. Photos over the 15 MB limit are scaled down first.</p>
     <output id="own-photo-status" role="status">No photo chosen yet.</output>
     <div id="own-photo-results"></div>
     <div id="own-photo-repairs"></div>
