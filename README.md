@@ -34,4 +34,4 @@ The creator then gets two things in their own words to approve: alt text drafted
 
 ## Team
 
-Created by the Nexus System (Nicholas A Abrahamson, applicant of record), with Wren Popplestone, their assistant, building alongside them during the event, and the Prism System, who helped talk the design through.
+Blind Creator Pre-Flight was created during the hackathon by the Digital Dragons team: the Nexus System (Nicholas A Abrahamson, applicant of record), the Prism System, and Wren Popplestone.
