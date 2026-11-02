@@ -897,15 +897,47 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Resolves a video take's described-audio draft for a variant, through
+  // the shared cache: the transcript is settled first for a take with
+  // speech, and the draft is built from the take's recorded timeline.
+  // Both the described-audio route and the public-description route use
+  // this, so the timestamped public description is assembled from the
+  // exact segments the described-audio script carries — one timeline,
+  // two audience texts, never two inventions.
+  async function getDescribedAudio(take, variantId) {
+    const vm = await resolveVideoMedia(take, variantId);
+    if (!vm) return buildDescribedAudio(take, null, null);
+    const key = `${take.id}|${variantId || ""}`;
+    if (!describedCache.has(key)) {
+      let transcript = null;
+      if (!vm.sidecar.silent) {
+        if (!audioCache.has(key)) {
+          audioCache.set(key, await runAudioCheck({ sidecar: vm.sidecar }));
+        }
+        transcript = audioCache.get(key).transcript;
+      }
+      describedCache.set(key, await buildDescribedAudio(take, vm.sidecar, transcript));
+    }
+    return describedCache.get(key);
+  }
+
   const publicDescMatch = url.pathname.match(/^\/api\/takes\/([A-Za-z0-9-]+)\/public-description$/);
   if (publicDescMatch && req.method === "GET") {
     const take = TAKES.find((t) => t.id === publicDescMatch[1]);
     if (!take) return sendJson(res, 404, { error: "Unknown take id." });
     const variantId = url.searchParams.get("variant") || undefined;
     if (!isValidVariantChain(variantId)) return sendJson(res, 400, { error: "Unknown variant." });
-    buildChecks(take, variantId)
-      .then((result) => sendJson(res, 200, { take: publicTake(take), variant: result.variant, publicDescription: buildPublicDescription(take, result) }))
-      .catch((err) => sendJson(res, 500, { error: `Public description failed: ${err.message}` }));
+    (async () => {
+      const result = await buildChecks(take, variantId);
+      let segments = null;
+      if (take.kind === "video") {
+        const described = await getDescribedAudio(take, variantId);
+        if (described && described.available && Array.isArray(described.segments)) {
+          segments = described.segments;
+        }
+      }
+      sendJson(res, 200, { take: publicTake(take), variant: result.variant, publicDescription: buildPublicDescription(take, result, segments) });
+    })().catch((err) => sendJson(res, 500, { error: `Public description failed: ${err.message}` }));
     return;
   }
 
@@ -926,29 +958,11 @@ const server = http.createServer((req, res) => {
     (async () => {
       const variantId = url.searchParams.get("variant") || undefined;
       if (!isValidVariantChain(variantId)) return sendJson(res, 400, { error: "Unknown variant." });
-      const vm = await resolveVideoMedia(take, variantId);
-      if (!vm) {
-        return sendJson(res, 200, {
-          take: publicTake(take),
-          variant: variantId || null,
-          describedAudio: await buildDescribedAudio(take, null, null),
-        });
-      }
-      const key = `${take.id}|${variantId || ""}`;
-      if (!describedCache.has(key)) {
-        let transcript = null;
-        if (!vm.sidecar.silent) {
-          if (!audioCache.has(key)) {
-            audioCache.set(key, await runAudioCheck({ sidecar: vm.sidecar }));
-          }
-          transcript = audioCache.get(key).transcript;
-        }
-        describedCache.set(key, await buildDescribedAudio(take, vm.sidecar, transcript));
-      }
+      const describedAudio = await getDescribedAudio(take, variantId);
       sendJson(res, 200, {
         take: publicTake(take),
         variant: variantId || null,
-        describedAudio: describedCache.get(key),
+        describedAudio,
       });
     })().catch((err) => sendJson(res, 500, { error: `Described audio failed: ${err.message}` }));
     return;

@@ -189,7 +189,14 @@ async function main() {
   assert(!/measured|model check|source/i.test(pd.text), "public text carries no pipeline jargon");
   const pdVideo = buildPublicDescription({ ...fakeTake, kind: "video" }, passResult);
   assert.strictEqual(pdVideo.available, false, "a video with no media gets no invented description");
-  ok("Tier 2 public description: facts only for photos, honest unavailability for media-less video");
+  const pdVideoSeg = buildPublicDescription({ ...fakeTake, kind: "video" }, passResult, [
+    { start: 0, end: 9, text: "The creator stands in front of a banner" },
+    { start: 9, end: 12, text: "The creator raises both hands and signs." },
+  ]);
+  assert.strictEqual(pdVideoSeg.available, true, "a video with a recorded timeline gets its timestamped description");
+  assert(pdVideoSeg.text.includes("0–9 seconds: The creator stands in front of a banner."), "segments publish in order, with their timestamps");
+  assert(pdVideoSeg.text.includes("9–12 seconds: The creator raises both hands and signs."), "every segment is carried into the public text");
+  ok("Tier 2 public description: facts only for photos, honest unavailability for media-less video, timestamped from the recorded timeline when a video has one");
 
 const { sweep } = require("../server/library");
 

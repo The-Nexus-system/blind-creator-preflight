@@ -154,18 +154,37 @@ function readiness(result, { warningAcknowledged, altTextApproved }) {
   return { ready: reasons.length === 0, reasons };
 }
 
-function buildPublicDescription(take, result) {
+function buildPublicDescription(take, result, describedSegments) {
   // Tier 2: the public, audience-facing description — the proof copy's
   // sibling, built from the same facts but written for the audience:
   // concise, in the open, and creator-approved before it is ever used.
-  // For a video it is timestamped by segment; the timestamped form is
-  // not built yet in this version of Pre-Flight, so the description
-  // honestly reports itself unavailable rather than inventing a timeline.
+  // For a video it is timestamped, assembled from the take's recorded
+  // timeline — the same segments its described-audio script is drafted
+  // from (the caller resolves them through the described-audio path and
+  // passes them in). When a video has no recorded timeline to publish
+  // from, the description honestly reports itself unavailable rather
+  // than inventing timestamps.
   if (take.kind === "video") {
+    const segments = Array.isArray(describedSegments) ? describedSegments : null;
+    if (!segments || segments.length === 0) {
+      return {
+        available: false,
+        reason:
+          "This take has no recorded timeline to publish timestamps from, so there is no timestamped description to offer — nothing is described that no check has seen.",
+      };
+    }
+    const sentences = [take.intent.endsWith(".") ? take.intent : `${take.intent}.`];
+    for (const s of segments) {
+      const text = String(s.text || "").trim();
+      if (!text) continue;
+      sentences.push(`${s.start}–${s.end} seconds: ${text.endsWith(".") ? text : `${text}.`}`);
+    }
     return {
-      available: false,
-      reason:
-        "The timestamped public description for a video is not built yet in this version of Pre-Flight, so there are no timestamps to publish — nothing is described that no check has seen.",
+      available: true,
+      text: sentences.join(" "),
+      source: "assembled",
+      note:
+        "Assembled from your intent and the take's recorded timeline — the same recorded facts its described-audio script is drafted from, and nothing is described that no check has seen. Edit it freely; like the alt text, it is only ever used with your approval. It is optional: a post does not need it to be ready.",
     };
   }
   const byId = Object.fromEntries(result.checks.map((c) => [c.id, c]));
