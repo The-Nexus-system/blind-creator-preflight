@@ -34,4 +34,6 @@ The creator then gets two things in their own words to approve: alt text drafted
 
 ## Team
 
-Blind Creator Pre-Flight was created during the hackathon by the Digital Dragons team: the Nexus System (Nicholas A Abrahamson, applicant of record), the Prism System, and Wren Popplestone.
+Digital Dragons
+
+Team Members: the Nexus System (Nicholas A Abrahamson, applicant of record), the Prism System, and Wren Popplestone.
