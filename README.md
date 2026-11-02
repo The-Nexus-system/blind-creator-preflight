@@ -34,4 +34,4 @@ The creator then gets two things in their own words to approve: alt text drafted
 
 ## Team
 
-Created by the Nexus System (Nicholas A Abrahamson, applicant of record), with Wren, their assistant, building alongside them during the event.
+Created by the Nexus System (Nicholas A Abrahamson, applicant of record), with Wren Popplestone, their assistant, building alongside them during the event.
