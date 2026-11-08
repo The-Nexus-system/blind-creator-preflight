@@ -35,7 +35,7 @@ const { locateBoxes, resolvePhotoBoxes, dropPrivateSign } = require("./sam");
 const { estimateBoxes } = require("./judge");
 const { runAudioCheck } = require("./audio");
 const { buildDescribedAudio } = require("./narrate");
-const { handleUploadRoutes } = require("./upload");
+const { handleUploadRoutes, handleShareTarget } = require("./upload");
 const { buildProofCopy, draftAltText, readiness, buildPublicDescription } = require("./copy");
 const { availableRepairs, applyRepair, applyTransform, composeTransforms, composeCoverFrame, REDACT_REPAIR_ID } = require("./repair");
 const { sweep } = require("./library");
@@ -607,6 +607,8 @@ const MIME = {
   ".css": "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".txt": "text/plain; charset=utf-8",
+  ".png": "image/png",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
 };
 
 function sendJson(res, status, body) {
@@ -632,6 +634,21 @@ const server = http.createServer((req, res) => {
       checksNote:
         "Framing and crop safety are measured from boxes located by SAM 3.1 when live calls are on; when SAM returns no match in a take, Muse Wonder estimates the boxes by judgement — falling back to Muse Spark 1.3-contributor when Wonder is unavailable or its reply cannot be trusted — and the checks say so: an estimate, never presented as a SAM measurement; when judgement cannot supply boxes either, the take's recorded facts stand, and a failed SAM call makes those checks uncertain, never guessed. Sharpness and quality are measured from pixels. Text, first impression, and the privacy warning come from the Muse Wonder semantic pipeline, with the same Muse Spark 1.3-contributor fallback. A video's speech track is transcribed by Muse Voice Transcribe and the audio check is judged from the transcript; a silent take reports that there is nothing to transcribe, because the silence is part of the take. Model calls run only when the funding switch is on (MODEL_CALLS_ENABLED) — while it is off, model checks report uncertain with the reason, never a guessed verdict.",
     });
+  }
+
+  // Share target: the installed web app's place in the phone's Share
+  // sheet. A shared photo is opened as an upload session by
+  // server/upload.js and the browser is redirected back into the app.
+  if (url.pathname === "/share-target") {
+    if (req.method !== "POST") {
+      res.writeHead(303, { Location: "/" });
+      return res.end();
+    }
+    handleShareTarget(req, res, {}).catch((err) => {
+      res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end(`The shared photo could not be checked: ${err.message}`);
+    });
+    return;
   }
 
   if (url.pathname === "/api/library/sweep") {

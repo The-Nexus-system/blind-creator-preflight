@@ -3,16 +3,45 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Blind Creator Pre-Flight — check before you post</title>
+<meta name="description" content="Pre-Flight — check a photo before you post it.">
+<meta name="theme-color" content="#0a2342">
+<title>Pre-Flight</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <header>
-  <h1>Blind Creator Pre-Flight</h1>
+  <h1>Pre-Flight</h1>
   <p>Check a photo before you post it — your own, below, or a seeded example. The seeded demo also includes a short video take. Every result is plain text: pass, fix, or uncertain.</p>
 </header>
 
 <main>
+  <section aria-labelledby="bring-post-heading">
+    <h2 id="bring-post-heading">Bring a post to Pre-Flight</h2>
+    <p>Pre-Flight cannot step inside Facebook or Instagram while you compose — those apps give no outside app a pre-post doorway, and the phone keeps each app's contents to itself. What Pre-Flight can do is stand at the sharing step, where the photo is already moving between apps:</p>
+    <ul>
+      <li>Share a photo to Pre-Flight. On Android and other browsers that support installed web apps in the Share sheet, install Pre-Flight below and it appears as a Share choice for photos. Pick it and the photo lands in “Check your own photo,” already checked.</li>
+      <li>Start here, then share onward. Check the photo below, approve the words, and the Share step at the end sends the checked photo and its alt text onward — to Facebook or Instagram where they appear in your share sheet.</li>
+      <li>On iPhone and iPad, Apple does not give web apps a place in the Share sheet. Open Pre-Flight and pick the photo, or set the posting prompt below so your phone nudges you before you post.</li>
+    </ul>
+    <p id="install-status" role="status">Installing is optional — Pre-Flight works in this browser tab either way. Installing is what gives it a home-screen icon and, where the browser supports it, its place in the Share sheet.</p>
+    <p>
+      <button type="button" id="install-button" hidden>Install Pre-Flight</button>
+      <button type="button" id="copy-link-button">Copy the Pre-Flight link</button>
+    </p>
+    <h3>Posting prompt (iPhone and iPad)</h3>
+    <p>A Shortcut automation can ask “Posting? Run Pre-Flight first?” whenever Facebook or Instagram opens. It cannot see what you pick inside those apps — it is a nudge at the door, not a step inside. To set it up:</p>
+    <ol>
+      <li>Copy the Pre-Flight link with the button above.</li>
+      <li>Open the Shortcuts app, go to Automation, and add a new personal automation.</li>
+      <li>Choose App, pick Facebook or Instagram, and choose “Is Opened.”</li>
+      <li>Add the action “Show Notification” with the words: Posting? Run Pre-Flight first.</li>
+      <li>Add the action “Open URLs” and paste the Pre-Flight link.</li>
+    </ol>
+  </section>
+
   <section aria-labelledby="own-photo-heading">
     <h2 id="own-photo-heading">Check your own photo</h2>
     <p>Pick a photo of your own and the same six checks run on it, live. Your browser converts the photo you choose to PNG and sends it to be checked; Pre-Flight keeps a working copy of it on the server while you check, repair, and share it, and that copy is deleted within two hours. A photo of your own has no recorded facts and no stated intent, so where its subject cannot be located, framing and crop safety will say uncertain and say why.</p>
@@ -79,6 +108,7 @@
 
 <footer>
   <p>Demo build for the Meta Global AI Developer Hackathon. Every verdict names how it was reached — measured from the take, judged by the model check, or determined by the take itself. A check that has not run reports "uncertain" and says why; nothing is ever presented as more than it is.</p>
+  <p><a href="https://preflight.digitaldragonsinc.com/privacy.html">Privacy Policy</a> · <a href="https://preflight.digitaldragonsinc.com/terms.html">Terms of Use and EULA</a> · <a href="https://preflight.digitaldragonsinc.com/support.html">Support</a></p>
 </footer>
 
 <script src="app.js"></script>

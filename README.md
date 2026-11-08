@@ -1,4 +1,4 @@
-# Blind Creator Pre-Flight
+# Pre-Flight
 
 A pre-publish check for blind and DeafBlind creators, built during the Meta Global AI Developer Hackathon (October 26 – November 4, 2026), Indie track, theme: Build for Your World.
 
@@ -20,6 +20,14 @@ Alongside any verdict it can produce, a named private-information warning flags 
 Visitors can also run the whole flow on a photo of their own: pick a photo and the same six checks run on it live, then the repairs those verdicts offer, the proof copy and alt text, and a share step — the seeded flow, on the visitor's own photo. The browser converts the photo to PNG and sends it to the backend, which keeps a working copy only while the creator works with it — the copy is deleted within two hours, and the page says exactly that. A supplied photo has no recorded facts and no stated intent, so its framing and crop safety are measured from SAM 3.1's boxes or the judgement tier's estimate, and read uncertain when neither can locate the subject: there is no record to fall back to.
 
 The creator then gets two things in their own words to approve: alt text drafted from their own stated intent for the post, and proof copy — a speech-and-braille-ready text version of what they are about to publish. An optional public description for the audience can be approved the same way; for a video it is timestamped, assembled from the take's recorded timeline — the same recorded facts its described-audio script is drafted from. Deterministic problems get deterministic repairs (re-crop, re-frame suggestions), the checks run again, and nothing is ever published, attached, or marked approved that the creator has not approved themselves.
+
+## Bringing a post to Pre-Flight
+
+Pre-Flight cannot step inside Facebook or Instagram while a creator composes: those apps offer no pre-post doorway to outside apps, and the phone's sandbox keeps each app's contents to itself. The supported meeting point is the sharing step, and the app now stands there three ways:
+
+- Share to Pre-Flight (installed web app). The app is installable (manifest + service worker). On Android and other browsers that put installed web apps in the Share sheet, Pre-Flight appears as a Share choice for photos: the shared photo arrives at POST /share-target, is converted to the PNG the pipeline reads and reduced to the upload cap when needed, and opens an ordinary upload session — the "Check your own photo" flow, already checked. A shared link is never fetched (a link is not the original photo, and fetching arbitrary URLs would be its own risk); a shared video is named as out of scope for the own-media flow, whose video checks run on the seeded take. Both cases land on plain sentences in the app, never silence.
+- Start in Pre-Flight, share onward. The existing end-of-flow Share step sends the checked photo (or take still) and its approved alt text onward through the device's share sheet, where Facebook and Instagram appear when installed.
+- A posting prompt on iPhone and iPad. Apple gives web apps no Share-sheet place, so the app carries exact steps for a Shortcuts automation — when Facebook or Instagram opens, show "Posting? Run Pre-Flight first" and open Pre-Flight. It is a nudge at the door; it cannot see what is picked inside Meta's apps, and the app says so.
 
 ## How it is built
 

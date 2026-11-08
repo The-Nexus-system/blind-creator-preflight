@@ -36,6 +36,7 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { Jimp } = require("jimp");
 const { CHECKS } = require("./seed-takes");
 const { measureImage } = require("./measure");
 const { resolvePhotoBoxes } = require("./sam");
@@ -48,6 +49,11 @@ const { buildUploadProofCopy, draftUploadAltText, readiness } = require("./copy"
 // client enforces the same cap on the PNG it produces (client/app.js),
 // scaling the photo down first when it would exceed it.
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
+// A share-target delivery arrives as a multipart form, so its cap is
+// higher than the checked PNG cap: form overhead plus the original
+// camera file. The file is decoded and reduced to the checked PNG cap
+// before a session is created.
+const MAX_SHARE_BYTES = 32 * 1024 * 1024;
 const UPLOAD_TMP_DIR = path.join(__dirname, "uploads-tmp");
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -564,6 +570,147 @@ async function handleUploadCheck(req, res, deps = {}) {
   }
 }
 
+// --- Share target -------------------------------------------------------------
+// POST /share-target — the installed web app's place in the phone's
+// Share sheet (the Web Share Target in client/manifest.webmanifest).
+// A photo shared from Photos or another app arrives here as a
+// multipart form. The first image file is decoded, converted to the
+// PNG the check pipeline reads, reduced to the upload cap when it has
+// to be, and opened as an ordinary upload session; the browser is then
+// redirected to the app with that session named, and the client loads
+// the session's checks into the "Check your own photo" unit.
+//
+// Boundaries, stated plainly:
+// - A shared link or text is NOT fetched. A Facebook or Instagram link
+//   is not the creator's original photo, and fetching arbitrary shared
+//   URLs would be a security problem of its own. The redirect names
+//   the link case and the app says to share or pick the photo itself.
+// - A shared video is named as its own case: this build checks a
+//   creator's own photos; its video checks run on the seeded video
+//   take. Nothing about a shared video is silently dropped or faked
+//   into a photo check.
+
+function redirect(res, location) {
+  res.writeHead(303, { Location: location });
+  res.end();
+}
+
+function splitBuffer(buffer, delimiter) {
+  const parts = [];
+  let start = 0;
+  for (;;) {
+    const at = buffer.indexOf(delimiter, start);
+    if (at === -1) {
+      parts.push(buffer.subarray(start));
+      return parts;
+    }
+    parts.push(buffer.subarray(start, at));
+    start = at + delimiter.length;
+  }
+}
+
+// The smallest multipart reader that browsers' share forms need: it
+// splits on the declared boundary and parses each part's
+// Content-Disposition and Content-Type. It is not a general forms
+// library; file bytes are handled as Buffers throughout.
+function parseMultipart(buffer, contentType) {
+  const match = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType || "");
+  if (!match) return null;
+  const boundary = Buffer.from(`--${match[1] || match[2]}`);
+  const fields = {};
+  const files = [];
+  for (let segment of splitBuffer(buffer, boundary)) {
+    if (segment.length >= 2 && segment[0] === 0x2d && segment[1] === 0x2d) break; // closing "--"
+    if (segment.length >= 2 && segment[0] === 0x0d && segment[1] === 0x0a) {
+      segment = segment.subarray(2);
+    }
+    if (segment.length >= 2 && segment[segment.length - 2] === 0x0d && segment[segment.length - 1] === 0x0a) {
+      segment = segment.subarray(0, segment.length - 2);
+    }
+    if (!segment.length) continue;
+    const splitAt = segment.indexOf("\r\n\r\n");
+    if (splitAt === -1) continue;
+    const headers = segment.subarray(0, splitAt).toString("utf8");
+    const body = segment.subarray(splitAt + 4);
+    const disposition = /content-disposition:\s*form-data([^\r\n]*)/i.exec(headers);
+    if (!disposition) continue;
+    const nameMatch = /name="([^"]*)"/.exec(disposition[1]);
+    if (!nameMatch) continue;
+    const name = nameMatch[1];
+    const filenameMatch = /filename="([^"]*)"/.exec(disposition[1]);
+    const typeMatch = /content-type:\s*([^\r\n]+)/i.exec(headers);
+    if (filenameMatch && filenameMatch[1]) {
+      files.push({
+        name,
+        filename: filenameMatch[1],
+        contentType: typeMatch ? typeMatch[1].trim() : "",
+        buffer: body,
+      });
+    } else {
+      fields[name] = body.toString("utf8");
+    }
+  }
+  return { fields, files };
+}
+
+async function handleShareTarget(req, res, deps = {}) {
+  const contentType = req.headers["content-type"] || "";
+  if (!/^multipart\/form-data\b/i.test(contentType)) {
+    return redirect(res, "/?share=unsupported");
+  }
+  const read = await readBodyWithCap(req, MAX_SHARE_BYTES);
+  if (read.tooLarge) return redirect(res, "/?share=too-large");
+  if (read.aborted || !read.buffer) {
+    res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+    return res.end("The shared photo did not arrive complete, so nothing was checked.");
+  }
+  const parsed = parseMultipart(read.buffer, contentType);
+  if (!parsed) return redirect(res, "/?share=unsupported");
+
+  const file = parsed.files[0] || null;
+  if (!file) {
+    const hasWords = ["title", "text", "url"].some((key) => (parsed.fields[key] || "").trim());
+    return redirect(res, hasWords ? "/?share=link" : "/?share=empty");
+  }
+  if ((file.contentType || "").startsWith("video/")) {
+    return redirect(res, "/?share=video");
+  }
+
+  let image;
+  try {
+    image = await Jimp.fromBuffer(file.buffer);
+  } catch {
+    return redirect(res, "/?share=unsupported");
+  }
+  let scaled = false;
+  try {
+    const longest = Math.max(image.width, image.height);
+    if (longest > 3000) {
+      const f = 3000 / longest;
+      image.resize({
+        w: Math.max(1, Math.round(image.width * f)),
+        h: Math.max(1, Math.round(image.height * f)),
+      });
+      scaled = true;
+    }
+    let png = await image.getBuffer("image/png");
+    while (png.length > MAX_UPLOAD_BYTES && image.width > 64 && image.height > 64) {
+      image.resize({
+        w: Math.max(1, Math.floor(image.width * 0.8)),
+        h: Math.max(1, Math.floor(image.height * 0.8)),
+      });
+      scaled = true;
+      png = await image.getBuffer("image/png");
+    }
+    if (png.length > MAX_UPLOAD_BYTES) return redirect(res, "/?share=too-large");
+    await sweepUploadSessions();
+    const { sessionId } = await createUploadSession(png, { ...deps, scaled });
+    return redirect(res, `/?shared=${sessionId}`);
+  } catch {
+    return redirect(res, "/?share=error");
+  }
+}
+
 async function readJsonBody(req) {
   const read = await readBodyWithCap(req, 64 * 1024);
   if (read.tooLarge) throw httpError(413, "Request body too large.");
@@ -655,6 +802,8 @@ async function handleUploadRoutes(req, res, url, deps = {}) {
 module.exports = {
   handleUploadCheck,
   handleUploadRoutes,
+  handleShareTarget,
+  parseMultipart,
   buildUploadChecks,
   runUploadChecks,
   createUploadSession,
@@ -669,6 +818,7 @@ module.exports = {
   isPng,
   isValidVariantChain,
   MAX_UPLOAD_BYTES,
+  MAX_SHARE_BYTES,
   UPLOAD_TMP_DIR,
   UPLOAD_INTENT,
   SESSION_TTL_MS,

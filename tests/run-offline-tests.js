@@ -1358,6 +1358,108 @@ const { sweep } = require("../server/library");
   assert(clientSrc.includes("stopDescriptionPlayback"), "playback stops when the take's unit is rebuilt");
   ok("described audio playback: device-voice wiring, honest labelling, and the no-synthesis path are in the client");
 
+  // 20. Share target (Nov 8, 2026): the installed web app's place in
+  // the phone's Share sheet. A multipart form carrying a photo opens
+  // an ordinary upload session and redirects into the app with it; a
+  // link-only share and a video are each named as their own case and
+  // never fetched or faked into a photo check. All over HTTP with the
+  // same stubs — no network beyond loopback, no spend.
+  const { handleShareTarget, parseMultipart } = require("../server/upload");
+  const shareBoundary = "----preflight-share-test";
+  function multipartBody(parts) {
+    const chunks = [];
+    for (const part of parts) {
+      let head = `--${shareBoundary}\r\nContent-Disposition: form-data; name="${part.name}"`;
+      if (part.filename) head += `; filename="${part.filename}"`;
+      head += "\r\n";
+      if (part.contentType) head += `Content-Type: ${part.contentType}\r\n`;
+      head += "\r\n";
+      chunks.push(Buffer.from(head), part.buffer || Buffer.from(part.value || ""), Buffer.from("\r\n"));
+    }
+    chunks.push(Buffer.from(`--${shareBoundary}--\r\n`));
+    return Buffer.concat(chunks);
+  }
+  const parsedShare = parseMultipart(
+    multipartBody([
+      { name: "text", value: "hello" },
+      { name: "media", filename: "photo.png", contentType: "image/png", buffer: p1buf },
+    ]),
+    `multipart/form-data; boundary=${shareBoundary}`
+  );
+  assert.strictEqual(parsedShare.fields.text, "hello");
+  assert.strictEqual(parsedShare.files.length, 1);
+  assert(parsedShare.files[0].buffer.equals(p1buf), "the file part's bytes survive parsing exactly");
+  ok("share target: the multipart reader carries fields and exact file bytes");
+
+  const shareHttp = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    if (url.pathname === "/share-target" && req.method === "POST") {
+      handleShareTarget(req, res, { segmenter: uploadSeg, chat: uploadChat }).catch((err) => {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: err.message }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((resolve) => shareHttp.listen(0, "127.0.0.1", resolve));
+  const shareBase = `http://127.0.0.1:${shareHttp.address().port}`;
+  try {
+    const photoRes = await fetch(`${shareBase}/share-target`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "Content-Type": `multipart/form-data; boundary=${shareBoundary}` },
+      body: multipartBody([
+        { name: "title", value: "From Photos" },
+        { name: "media", filename: "photo.png", contentType: "image/png", buffer: p1buf },
+      ]),
+    });
+    assert.strictEqual(photoRes.status, 303);
+    const location = photoRes.headers.get("location") || "";
+    const sharedMatch = /[?&]shared=([a-f0-9]{32})$/.exec(location);
+    assert(sharedMatch, "a shared photo redirects into the app with its session id");
+    assert(
+      fs.existsSync(path.join(UPLOAD_TMP_DIR, sharedMatch[1], "original.png")),
+      "the shared photo opened an ordinary upload session"
+    );
+    fs.rmSync(path.join(UPLOAD_TMP_DIR, sharedMatch[1]), { recursive: true, force: true });
+    ok("share target: a shared photo opens a session and redirects into the app");
+
+    const linkRes = await fetch(`${shareBase}/share-target`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "Content-Type": `multipart/form-data; boundary=${shareBoundary}` },
+      body: multipartBody([{ name: "url", value: "https://www.instagram.com/p/example/" }]),
+    });
+    assert.strictEqual(linkRes.status, 303);
+    assert.strictEqual(linkRes.headers.get("location"), "/?share=link", "a link is named, never fetched");
+    const videoRes = await fetch(`${shareBase}/share-target`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "Content-Type": `multipart/form-data; boundary=${shareBoundary}` },
+      body: multipartBody([
+        { name: "media", filename: "clip.mp4", contentType: "video/mp4", buffer: Buffer.from("not a real video") },
+      ]),
+    });
+    assert.strictEqual(videoRes.headers.get("location"), "/?share=video", "a video is named as its own case");
+    assert.deepStrictEqual(fs.readdirSync(UPLOAD_TMP_DIR), [], "link and video shares store nothing");
+    ok("share target: a link is not fetched and a video is not faked into a photo check");
+
+    const clientHtml = fs.readFileSync(path.join(__dirname, "..", "client", "index.html"), "utf8");
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "..", "client", "manifest.webmanifest"), "utf8")
+    );
+    assert.strictEqual(manifest.share_target.action, "/share-target");
+    assert.strictEqual(manifest.share_target.method, "POST");
+    assert(clientHtml.includes('rel="manifest"'), "the page links the manifest");
+    assert(clientSrc.includes("loadSharedSession"), "the client loads a shared session into the own-photo unit");
+    assert(clientSrc.includes("serviceWorker"), "the client registers the service worker that makes install possible");
+    ok("share target: manifest, page link, and client arrival handling are all in place");
+  } finally {
+    shareHttp.close();
+  }
+
   console.log(`\n${passed} test groups passed.`);
 }
 

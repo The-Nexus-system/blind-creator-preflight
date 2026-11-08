@@ -644,7 +644,7 @@ async function seededShareParts(take) {
 function renderShareArea(take) {
   renderShareBlock(shareAreaEl, {
     explanation:
-      "Share this take's current picture — the repaired version if you have repaired it, otherwise the original — together with the alt text above, to another app.",
+      "Share this take's current picture — the repaired version if you have repaired it, otherwise the original — together with the alt text above, onward to another app. Facebook and Instagram appear here when they are in this device's share sheet; Pre-Flight hands the post to them at this step rather than stepping inside their composers.",
     noShareText:
       "This browser cannot share from a web page, so there is no share button here. The proof copy above is ready to copy and paste instead.",
     getParts: () => seededShareParts(take),
@@ -1212,7 +1212,7 @@ async function ownShareParts() {
 function renderOwnShare() {
   renderShareBlock(ownPhotoShareEl, {
     explanation:
-      "Share your photo — the repaired version if you have repaired it, otherwise the photo as it arrived — together with the alt text above, to another app.",
+      "Share your photo — the repaired version if you have repaired it, otherwise the photo as it arrived — together with the alt text above, onward to another app. Facebook and Instagram appear here when they are in this device's share sheet; Pre-Flight hands the post to them at this step rather than stepping inside their composers.",
     noShareText:
       "This browser cannot share from a web page, so there is no share button here. The proof copy above is ready to copy and paste instead.",
     getParts: () => ownShareParts(),
@@ -1300,3 +1300,128 @@ async function checkOwnPhoto() {
 }
 
 ownPhotoInput.addEventListener("change", checkOwnPhoto);
+
+// --- Install, link, and share arrivals ---------------------------------------
+// Installing is what can give Pre-Flight its place in a phone's Share
+// sheet (the Web Share Target in the manifest). The install button
+// exists only when the browser itself offers an install prompt; on
+// browsers that install from their own menu (and on iPhone and iPad,
+// where installation is Share, then Add to Home Screen), the status
+// line says so in words instead of showing a button that does nothing.
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      // No service worker: the app still works as a plain web page;
+      // it simply cannot be installed or open offline.
+    });
+  });
+}
+
+const installButton = document.getElementById("install-button");
+const installStatusEl = document.getElementById("install-status");
+const copyLinkButton = document.getElementById("copy-link-button");
+let deferredInstallPrompt = null;
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+  if (installButton) installButton.hidden = false;
+  if (installStatusEl) {
+    installStatusEl.textContent =
+      "This browser can install Pre-Flight. Installing gives it a home-screen icon and, where the browser supports it, its place in the Share sheet for photos.";
+  }
+});
+
+if (installButton) {
+  installButton.addEventListener("click", async () => {
+    if (!deferredInstallPrompt) return;
+    deferredInstallPrompt.prompt();
+    const choice = await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+    installButton.hidden = true;
+    if (installStatusEl) {
+      installStatusEl.textContent =
+        choice && choice.outcome === "accepted"
+          ? "Pre-Flight is installed. On browsers that support it, Pre-Flight now appears in the Share sheet when you share a photo."
+          : "Installation was dismissed. Pre-Flight still works in this browser tab.";
+    }
+  });
+}
+
+window.addEventListener("appinstalled", () => {
+  if (installButton) installButton.hidden = true;
+  if (installStatusEl) {
+    installStatusEl.textContent =
+      "Pre-Flight is installed. On browsers that support it, Pre-Flight now appears in the Share sheet when you share a photo.";
+  }
+});
+
+if (copyLinkButton) {
+  copyLinkButton.addEventListener("click", async () => {
+    const url = `${window.location.origin}/`;
+    try {
+      await navigator.clipboard.writeText(url);
+      if (installStatusEl) installStatusEl.textContent = `The Pre-Flight link is copied: ${url}`;
+    } catch {
+      if (installStatusEl) {
+        installStatusEl.textContent = `Copy this Pre-Flight link: ${url}`;
+      }
+    }
+  });
+}
+
+// A photo shared to Pre-Flight arrives as an upload session id in the
+// address (?shared=...): load its checks into the own-photo unit, the
+// same unit the photo picker feeds. A share that carried no checkable
+// photo arrives as ?share=<case> and is answered with the plain
+// sentence for that case — never silence.
+async function loadSharedSession(sessionId) {
+  if (!/^[a-f0-9]{32}$/.test(sessionId)) {
+    ownPhotoStatusEl.textContent = "That shared link is not one Pre-Flight issued, so nothing was loaded.";
+    return;
+  }
+  ownPhotoStatusEl.textContent = "A photo was shared to Pre-Flight. Loading its checks…";
+  ownPhotoResultsEl.replaceChildren(el("p", "Loading the shared photo’s checks…"));
+  try {
+    const res = await fetch(`/api/uploads/${sessionId}/checks`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    ownSession = {
+      sessionId: data.sessionId || sessionId,
+      variant: null,
+      warningAcknowledged: false,
+      altTextApproved: false,
+    };
+    ownPhotoStatusEl.textContent =
+      "A photo was shared to Pre-Flight and has been checked. Its results are in this section, with any repairs, the proof copy, and the share onward after them. The working copy is deleted within two hours.";
+    renderOwnUnit(data);
+  } catch (err) {
+    ownPhotoStatusEl.textContent = `The shared photo could not be loaded: ${err.message}`;
+    ownPhotoResultsEl.replaceChildren(el("p", "The shared photo was not checked here. It may have passed its two-hour lifetime and been deleted."));
+  }
+}
+
+function showShareArrivalMessage(kind) {
+  const messages = {
+    link: "A link was shared to Pre-Flight. A link is not the original photo, and Pre-Flight does not fetch links from Facebook or Instagram — share the photo itself, or pick it below, and it will be checked.",
+    video: "A video was shared to Pre-Flight. This build checks your own photos; its video checks run on the seeded video take below. Nothing was checked from the shared video.",
+    unsupported: "What was shared could not be read as a photo here. A JPEG or PNG copy of the photo can be picked below and checked.",
+    "too-large": "The shared photo was too large to check even after being reduced. Nothing was stored.",
+    empty: "The share arrived with no photo in it. Pick the photo below and it will be checked.",
+    error: "The shared photo could not be checked. Pick it below to try the same check from here.",
+  };
+  const message = messages[kind];
+  if (!message) return;
+  ownPhotoStatusEl.textContent = message;
+  ownPhotoResultsEl.replaceChildren(el("p", message));
+}
+
+{
+  const arrival = new URLSearchParams(window.location.search);
+  if (arrival.get("shared")) {
+    loadSharedSession(arrival.get("shared"));
+  } else if (arrival.get("share")) {
+    showShareArrivalMessage(arrival.get("share"));
+  }
+}
